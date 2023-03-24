@@ -25,7 +25,9 @@ import (
 
 // Fake cadvisor.Interface implementation.
 type Fake struct {
-	NodeName string
+	NodeName   string
+	NodeCpu    int
+	NodeMemory int
 }
 
 const (
@@ -76,9 +78,9 @@ func (c *Fake) MachineInfo() (*cadvisorapi.MachineInfo, error) {
 	// Simulate a machine with 1 core and 3.75GB of memory.
 	// We set it to non-zero values to make non-zero-capacity machines in Kubemark.
 	return &cadvisorapi.MachineInfo{
-		NumCores:       fakeNumCores,
+		NumCores:       c.NodeCpu,
 		InstanceID:     cadvisorapi.InstanceID(c.NodeName),
-		MemoryCapacity: fakeMemoryCapacity,
+		MemoryCapacity: uint64(c.NodeMemory * 1024 * 1024 * 1024),
 	}, nil
 }
 

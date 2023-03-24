@@ -66,6 +66,9 @@ type hollowNodeConfig struct {
 	ProxierMinSyncPeriod time.Duration
 	NodeLabels           map[string]string
 	RegisterWithTaints   []core.Taint
+	NodeCpu              int
+	NodeMemory           int
+	NodeGpuNum           int
 }
 
 const (
@@ -91,6 +94,9 @@ func (c *hollowNodeConfig) addFlags(fs *pflag.FlagSet) {
 	bindableNodeLabels := cliflag.ConfigurationMap(c.NodeLabels)
 	fs.Var(&bindableNodeLabels, "node-labels", "Additional node labels")
 	fs.Var(utiltaints.NewTaintsVar(&c.RegisterWithTaints), "register-with-taints", "Register the node with the given list of taints (comma separated \"<key>=<value>:<effect>\"). No-op if register-node is false.")
+	fs.IntVar(&c.NodeCpu, "node-cpu", 72, "Node cpu num")
+	fs.IntVar(&c.NodeMemory, "node-memory", 288, "Node cpu memory(Gi) num")
+	fs.IntVar(&c.NodeGpuNum, "node-gpu", 10, "Node gpu num")
 }
 
 func (c *hollowNodeConfig) createClientConfigFromFile() (*restclient.Config, error) {
@@ -203,9 +209,11 @@ func run(config *hollowNodeConfig) {
 		}
 
 		cadvisorInterface := &kubemark.Fake{
-			NodeName: config.NodeName,
+			NodeName:   config.NodeName,
+			NodeCpu:    config.NodeCpu,
+			NodeMemory: config.NodeMemory,
 		}
-		containerManager := cm.NewStubContainerManager()
+		containerManager := cm.NewStubContainerManager(config.NodeGpuNum)
 
 		endpoint, err := fakeremote.GenerateEndpoint()
 		if err != nil {

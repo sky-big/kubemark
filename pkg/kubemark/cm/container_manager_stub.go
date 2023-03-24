@@ -31,10 +31,12 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/pluginmanager/cache"
 	"k8s.io/kubernetes/pkg/kubelet/status"
 	schedulerframework "k8s.io/kubernetes/pkg/scheduler/framework"
+	"strconv"
 )
 
 type containerManagerStub struct {
 	shouldResetExtendedResourceCapacity bool
+	GpuNum                              int
 }
 
 var _ cmlibrary.ContainerManager = &containerManagerStub{}
@@ -86,7 +88,7 @@ func (cm *containerManagerStub) GetPluginRegistrationHandler() cache.PluginHandl
 }
 
 func (cm *containerManagerStub) GetDevicePluginResourceCapacity() (v1.ResourceList, v1.ResourceList, []string) {
-	gpuNum, _ := resource.ParseQuantity("10")
+	gpuNum, _ := resource.ParseQuantity(strconv.Itoa(cm.GpuNum))
 	devicesCapacity := v1.ResourceList{
 		"nvidia.com/gpu": gpuNum,
 	}
@@ -136,8 +138,8 @@ func (cm *containerManagerStub) GetCPUs(_, _ string) []int64 {
 	return nil
 }
 
-func NewStubContainerManager() cmlibrary.ContainerManager {
-	return &containerManagerStub{shouldResetExtendedResourceCapacity: false}
+func NewStubContainerManager(gpuNum int) cmlibrary.ContainerManager {
+	return &containerManagerStub{shouldResetExtendedResourceCapacity: false, GpuNum: gpuNum}
 }
 
 func NewStubContainerManagerWithExtendedResource(shouldResetExtendedResourceCapacity bool) cmlibrary.ContainerManager {
