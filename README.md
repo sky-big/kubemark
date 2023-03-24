@@ -12,3 +12,9 @@ $ KUBE_BUILD_PLATFORMS=linux/amd64 make WHAT=cmd/kubemark
 
 1. 增加了自定义 kubemark 的 cpu、memory 资源大小;
 2. 增加了自定义 kubemark 的 gpu 资源大小;
+
+```
+$ kubemark --node-cpu=100 \
+           --node-memory=400 \
+           --node-gpu=20
+```
