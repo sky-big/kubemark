@@ -54,21 +54,25 @@ import (
 )
 
 type hollowNodeConfig struct {
-	KubeconfigPath       string
-	KubeletPort          int
-	KubeletReadOnlyPort  int
-	Morph                string
-	NodeName             string
-	ServerPort           int
-	ContentType          string
-	UseRealProxier       bool
-	ProxierSyncPeriod    time.Duration
-	ProxierMinSyncPeriod time.Duration
-	NodeLabels           map[string]string
-	RegisterWithTaints   []core.Taint
-	NodeCpu              int
-	NodeMemory           int
-	NodeGpuNum           int
+	KubeconfigPath            string
+	KubeletPort               int
+	KubeletReadOnlyPort       int
+	Morph                     string
+	NodeName                  string
+	ServerPort                int
+	ContentType               string
+	UseRealProxier            bool
+	ProxierSyncPeriod         time.Duration
+	ProxierMinSyncPeriod      time.Duration
+	NodeLabels                map[string]string
+	RegisterWithTaints        []core.Taint
+	NodeCpu                   int
+	NodeMemory                int
+	NodeGpuNum                int
+	NodeLeaseDurationSeconds  int
+	NodeStatusUpdateFrequency int
+	NodeStatusReportFrequency int
+	PodCIDR                   string
 }
 
 const (
@@ -97,6 +101,10 @@ func (c *hollowNodeConfig) addFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&c.NodeCpu, "node-cpu", 72, "Node cpu num")
 	fs.IntVar(&c.NodeMemory, "node-memory", 288, "Node cpu memory(Gi) num")
 	fs.IntVar(&c.NodeGpuNum, "node-gpu", 10, "Node gpu num")
+	fs.IntVar(&c.NodeStatusUpdateFrequency, "node-status-update-frequency", 10, "Specifies how often kubelet posts node status to master. Note: be cautious when changing the constant, it must work with nodeMonitorGracePeriod in nodecontroller.")
+	fs.IntVar(&c.NodeStatusReportFrequency, "node-status-report-frequency", 300, "report status frequency")
+	fs.IntVar(&c.NodeLeaseDurationSeconds, "node-lease-duration-seconds", 40, "report node lease frequency")
+	fs.StringVar(&c.PodCIDR, "pod-cidr", "10.244.3.0/24", "report node lease frequency")
 }
 
 func (c *hollowNodeConfig) createClientConfigFromFile() (*restclient.Config, error) {
@@ -116,13 +124,17 @@ func (c *hollowNodeConfig) createClientConfigFromFile() (*restclient.Config, err
 
 func (c *hollowNodeConfig) createHollowKubeletOptions() *kubemark.HollowKubletOptions {
 	return &kubemark.HollowKubletOptions{
-		NodeName:            c.NodeName,
-		KubeletPort:         c.KubeletPort,
-		KubeletReadOnlyPort: c.KubeletReadOnlyPort,
-		MaxPods:             maxPods,
-		PodsPerCore:         podsPerCore,
-		NodeLabels:          c.NodeLabels,
-		RegisterWithTaints:  c.RegisterWithTaints,
+		NodeName:                  c.NodeName,
+		KubeletPort:               c.KubeletPort,
+		KubeletReadOnlyPort:       c.KubeletReadOnlyPort,
+		MaxPods:                   maxPods,
+		PodsPerCore:               podsPerCore,
+		NodeLabels:                c.NodeLabels,
+		RegisterWithTaints:        c.RegisterWithTaints,
+		NodeStatusUpdateFrequency: c.NodeStatusUpdateFrequency,
+		NodeStatusReportFrequency: c.NodeStatusReportFrequency,
+		NodeLeaseDurationSeconds:  c.NodeLeaseDurationSeconds,
+		PodCIDR:                   c.PodCIDR,
 	}
 }
 

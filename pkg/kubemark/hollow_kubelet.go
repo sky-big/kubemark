@@ -139,13 +139,17 @@ func (hk *HollowKubelet) Run() {
 
 // HollowKubletOptions contains settable parameters for hollow kubelet.
 type HollowKubletOptions struct {
-	NodeName            string
-	KubeletPort         int
-	KubeletReadOnlyPort int
-	MaxPods             int
-	PodsPerCore         int
-	NodeLabels          map[string]string
-	RegisterWithTaints  []core.Taint
+	NodeName                  string
+	KubeletPort               int
+	KubeletReadOnlyPort       int
+	MaxPods                   int
+	PodsPerCore               int
+	NodeLabels                map[string]string
+	RegisterWithTaints        []core.Taint
+	NodeStatusUpdateFrequency int
+	NodeStatusReportFrequency int
+	NodeLeaseDurationSeconds  int
+	PodCIDR                   string
 }
 
 // Builds a KubeletConfiguration for the HollowKubelet, ensuring that the
@@ -167,6 +171,7 @@ func GetHollowKubeletConfig(opt *HollowKubletOptions) (*options.KubeletFlags, *k
 	f.RegisterNode = true
 	f.RegisterSchedulable = true
 	f.RegisterWithTaints = opt.RegisterWithTaints
+	f.NodeIP = "192.168.1.2"
 
 	// Config struct
 	c, err := options.NewKubeletConfiguration()
@@ -182,8 +187,13 @@ func GetHollowKubeletConfig(opt *HollowKubletOptions) (*options.KubeletFlags, *k
 	c.StaticPodPath = podFilePath
 	c.FileCheckFrequency.Duration = 20 * time.Second
 	c.HTTPCheckFrequency.Duration = 20 * time.Second
-	c.NodeStatusUpdateFrequency.Duration = 10 * time.Second
-	c.NodeStatusReportFrequency.Duration = 5 * time.Minute
+	// node status report
+	c.NodeStatusUpdateFrequency.Duration = time.Duration(opt.NodeStatusUpdateFrequency) * time.Second
+	c.NodeStatusReportFrequency.Duration = time.Duration(opt.NodeStatusReportFrequency) * time.Second
+	// node lease report
+	c.NodeLeaseDurationSeconds = int32(opt.NodeLeaseDurationSeconds)
+	// node pod cidr
+	c.PodCIDR = opt.PodCIDR
 	c.SyncFrequency.Duration = 10 * time.Second
 	c.EvictionPressureTransitionPeriod.Duration = 5 * time.Minute
 	c.MaxPods = int32(opt.MaxPods)
