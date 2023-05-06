@@ -1,3 +1,4 @@
+//go:build linux
 // +build linux
 
 /*
@@ -40,6 +41,7 @@ import (
 	e2ekubelet "k8s.io/kubernetes/test/e2e/framework/kubelet"
 	e2emetrics "k8s.io/kubernetes/test/e2e/framework/metrics"
 	imageutils "k8s.io/kubernetes/test/utils/image"
+	admissionapi "k8s.io/pod-security-admission/api"
 
 	"github.com/onsi/ginkgo"
 	"github.com/onsi/gomega"
@@ -49,7 +51,7 @@ const (
 	kubeletAddr = "localhost:10255"
 )
 
-var _ = framework.KubeDescribe("Density [Serial] [Slow]", func() {
+var _ = SIGDescribe("Density [Serial] [Slow]", func() {
 	const (
 		// The data collection time of resource collector and the standalone cadvisor
 		// is not synchronized, so resource collector may miss data or
@@ -62,6 +64,7 @@ var _ = framework.KubeDescribe("Density [Serial] [Slow]", func() {
 	)
 
 	f := framework.NewDefaultFramework("density-test")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 
 	ginkgo.BeforeEach(func() {
 		// Start a standalone cadvisor pod using 'createSync', the pod is running when it returns
@@ -446,7 +449,8 @@ func runDensitySeqTest(f *framework.Framework, rc *ResourceCollector, testArg de
 // between creations there is an interval for throughput control
 func createBatchPodWithRateControl(f *framework.Framework, pods []*v1.Pod, interval time.Duration) map[string]metav1.Time {
 	createTimes := make(map[string]metav1.Time)
-	for _, pod := range pods {
+	for i := range pods {
+		pod := pods[i]
 		createTimes[pod.ObjectMeta.Name] = metav1.Now()
 		go f.PodClient().Create(pod)
 		time.Sleep(interval)

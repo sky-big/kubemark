@@ -23,28 +23,27 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
-	"os"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"golang.org/x/net/http2"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/diff"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apiserver/pkg/endpoints/request"
+	"k8s.io/apiserver/pkg/endpoints/responsewriter"
 	"k8s.io/klog/v2"
 )
 
@@ -93,18 +92,27 @@ func TestTimeout(t *testing.T) {
 	timeoutErr := apierrors.NewServerTimeout(schema.GroupResource{Group: "foo", Resource: "bar"}, "get", 0)
 	record := &recorder{}
 
+	var ctx context.Context
+	withDeadline := func(handler http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			req = req.WithContext(ctx)
+			handler.ServeHTTP(w, req)
+		})
+	}
+
 	handler := newHandler(sendResponse, doPanic, writeErrors)
-	ts := httptest.NewServer(withPanicRecovery(
-		WithTimeout(handler, func(req *http.Request) (*http.Request, <-chan time.Time, func(), *apierrors.StatusError) {
-			return req, timeout, record.Record, timeoutErr
+	ts := httptest.NewServer(withDeadline(withPanicRecovery(
+		WithTimeout(handler, func(req *http.Request) (*http.Request, bool, func(), *apierrors.StatusError) {
+			return req, false, record.Record, timeoutErr
 		}), func(w http.ResponseWriter, req *http.Request, err interface{}) {
 			gotPanic <- err
 			http.Error(w, "This request caused apiserver to panic. Look in the logs for details.", http.StatusInternalServerError)
 		}),
-	)
+	))
 	defer ts.Close()
 
 	// No timeouts
+	ctx = context.Background()
 	sendResponse <- resp
 	res, err := http.Get(ts.URL)
 	if err != nil {
@@ -125,13 +133,15 @@ func TestTimeout(t *testing.T) {
 	}
 
 	// Times out
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
 	timeout <- time.Time{}
 	res, err = http.Get(ts.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res.StatusCode != http.StatusGatewayTimeout {
-		t.Errorf("got res.StatusCode %d; expected %d", res.StatusCode, http.StatusServiceUnavailable)
+		t.Errorf("got res.StatusCode %d; expected %d", res.StatusCode, http.StatusGatewayTimeout)
 	}
 	body, _ = ioutil.ReadAll(res.Body)
 	status := &metav1.Status{}
@@ -139,13 +149,14 @@ func TestTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(status, &timeoutErr.ErrStatus) {
-		t.Errorf("unexpected object: %s", diff.ObjectReflectDiff(&timeoutErr.ErrStatus, status))
+		t.Errorf("unexpected object: %s", cmp.Diff(&timeoutErr.ErrStatus, status))
 	}
 	if record.Count() != 1 {
 		t.Errorf("did not invoke record method: %#v", record)
 	}
 
 	// Now try to send a response
+	ctx = context.Background()
 	sendResponse <- resp
 	if err := <-writeErrors; err != http.ErrHandlerTimeout {
 		t.Errorf("got Write error of %v; expected %v", err, http.ErrHandlerTimeout)
@@ -171,6 +182,7 @@ func TestTimeout(t *testing.T) {
 	}
 
 	// Panics with http.ErrAbortHandler
+	ctx = context.Background()
 	doPanic <- http.ErrAbortHandler
 	res, err = http.Get(ts.URL)
 	if err != nil {
@@ -205,8 +217,7 @@ func TestTimeoutHeaders(t *testing.T) {
 		})
 	}
 
-	timeout := make(chan time.Time, 1)
-
+	postTimeoutCh := make(chan struct{})
 	ts := httptest.NewServer(
 		withDeadline(
 			WithTimeout(
@@ -214,14 +225,18 @@ func TestTimeoutHeaders(t *testing.T) {
 					h := w.Header()
 					// trigger the timeout
 					cancel()
-					timeout <- time.Now()
-					// mutate response Headers
-					for j := 0; j < 1000; j++ {
-						h.Set("Test", "post")
+					// keep mutating response Headers until the request times out
+					for {
+						select {
+						case <-postTimeoutCh:
+							return
+						default:
+							h.Set("Test", "post")
+						}
 					}
 				}),
-				func(req *http.Request) (*http.Request, <-chan time.Time, func(), *apierrors.StatusError) {
-					return req, timeout, func() {}, apierrors.NewServerTimeout(schema.GroupResource{Group: "foo", Resource: "bar"}, "get", 0)
+				func(req *http.Request) (*http.Request, bool, func(), *apierrors.StatusError) {
+					return req, false, func() { close(postTimeoutCh) }, apierrors.NewServerTimeout(schema.GroupResource{Group: "foo", Resource: "bar"}, "get", 0)
 				},
 			),
 		),
@@ -233,47 +248,124 @@ func TestTimeoutHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	if res.StatusCode != http.StatusGatewayTimeout {
+		t.Errorf("got res.StatusCode %d; expected %d", res.StatusCode, http.StatusGatewayTimeout)
+	}
+	res.Body.Close()
+}
+
+func TestTimeoutRequestHeaders(t *testing.T) {
+	origReallyCrash := runtime.ReallyCrash
+	runtime.ReallyCrash = false
+	defer func() {
+		runtime.ReallyCrash = origReallyCrash
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Add dummy request info, otherwise we skip postTimeoutFn
+	ctx = request.WithRequestInfo(ctx, &request.RequestInfo{})
+
+	withDeadline := func(handler http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			handler.ServeHTTP(w, req.WithContext(ctx))
+		})
+	}
+
+	ts := httptest.NewServer(
+		withDeadline(
+			WithTimeoutForNonLongRunningRequests(
+				http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+					// trigger the timeout
+					cancel()
+					// mutate request Headers
+					// Authorization filter does it for example
+					for j := 0; j < 10000; j++ {
+						req.Header.Set("Test", "post")
+					}
+				}),
+				func(r *http.Request, requestInfo *request.RequestInfo) bool {
+					return false
+				},
+			),
+		),
+	)
+	defer ts.Close()
+
+	client := &http.Client{}
+	req, err := http.NewRequest(http.MethodPatch, ts.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != http.StatusGatewayTimeout {
+		t.Errorf("got res.StatusCde %d; expected %d", res.StatusCode, http.StatusServiceUnavailable)
+	}
+	res.Body.Close()
+}
+
+func TestTimeoutWithLogging(t *testing.T) {
+	origReallyCrash := runtime.ReallyCrash
+	runtime.ReallyCrash = false
+	defer func() {
+		runtime.ReallyCrash = origReallyCrash
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	withDeadline := func(handler http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			handler.ServeHTTP(w, req.WithContext(ctx))
+		})
+	}
+
+	ts := httptest.NewServer(
+		WithHTTPLogging(
+			withDeadline(
+				WithTimeoutForNonLongRunningRequests(
+					http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+						// trigger the timeout
+						cancel()
+						// mutate request Headers
+						// Authorization filter does it for example
+						for j := 0; j < 10000; j++ {
+							req.Header.Set("Test", "post")
+						}
+					}),
+					func(r *http.Request, requestInfo *request.RequestInfo) bool {
+						return false
+					},
+				),
+			),
+		),
+	)
+	defer ts.Close()
+
+	client := &http.Client{}
+	req, err := http.NewRequest(http.MethodPatch, ts.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != http.StatusGatewayTimeout {
 		t.Errorf("got res.StatusCode %d; expected %d", res.StatusCode, http.StatusServiceUnavailable)
 	}
 	res.Body.Close()
 }
 
-func captureStdErr() (func() string, func(), error) {
-	var buf bytes.Buffer
-	reader, writer, err := os.Pipe()
-	if err != nil {
-		return nil, nil, err
-	}
-	stderr := os.Stderr
-	readerClosedCh := make(chan struct{})
-	stopReadingStdErr := func() string {
-		writer.Close()
-		<-readerClosedCh
-		return buf.String()
-	}
-	klog.LogToStderr(true)
-	cleanUp := func() {
-		os.Stderr = stderr
-		klog.LogToStderr(false)
-		stopReadingStdErr()
-	}
-	os.Stderr = writer
-	go func() {
-		io.Copy(&buf, reader)
-		readerClosedCh <- struct{}{}
-		close(readerClosedCh)
-	}()
-	klog.LogToStderr(true)
-
-	return stopReadingStdErr, cleanUp, nil
-}
-
 func TestErrConnKilled(t *testing.T) {
-	readStdErr, cleanUp, err := captureStdErr()
-	if err != nil {
-		t.Fatalf("unable to setup the test, err %v", err)
-	}
-	defer cleanUp()
+	var buf bytes.Buffer
+	klog.SetOutput(&buf)
+	klog.LogToStderr(false)
+	defer klog.LogToStderr(true)
+
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// this error must be ignored by the WithPanicRecovery handler
 		// it is thrown by WithTimeoutForNonLongRunningRequests handler when a response has been already sent to the client and the handler timed out
@@ -289,17 +381,20 @@ func TestErrConnKilled(t *testing.T) {
 	ts := httptest.NewServer(WithPanicRecovery(handler, resolver))
 	defer ts.Close()
 
-	_, err = http.Get(ts.URL)
+	_, err := http.Get(ts.URL)
 	if err == nil {
 		t.Fatal("expected to receive an error")
 	}
 
-	// we should only get one line for this, not the big stack from before
-	capturedOutput := readStdErr()
-	if strings.Count(capturedOutput, "\n") != 1 {
-		t.Errorf("unexpected output captured actual = %v", capturedOutput)
+	klog.Flush()
+	klog.SetOutput(&bytes.Buffer{}) // prevent further writes into buf
+	capturedOutput := buf.String()
+
+	// We don't expect stack trace from the panic to be included in the log.
+	if isStackTraceLoggedByRuntime(capturedOutput) {
+		t.Errorf("unexpected stack trace in log, actual = %v", capturedOutput)
 	}
-	if !strings.Contains(capturedOutput, `timeout or abort while handling: GET "/"`) {
+	if !strings.Contains(capturedOutput, `timeout or abort while handling: method=GET URI="/" audit-ID=""`) {
 		t.Errorf("unexpected output captured actual = %v", capturedOutput)
 	}
 }
@@ -326,11 +421,11 @@ func (t *panicOnNonReuseTransport) GotConn(info httptrace.GotConnInfo) {
 // TestErrConnKilledHTTP2 check if HTTP/2 connection is not closed when an HTTP handler panics
 // The net/http library recovers the panic and sends an HTTP/2 RST_STREAM.
 func TestErrConnKilledHTTP2(t *testing.T) {
-	readStdErr, cleanUp, err := captureStdErr()
-	if err != nil {
-		t.Fatalf("unable to setup the test, err %v", err)
-	}
-	defer cleanUp()
+	var buf bytes.Buffer
+	klog.SetOutput(&buf)
+	klog.LogToStderr(false)
+	defer klog.LogToStderr(true)
+
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// this error must be ignored by the WithPanicRecovery handler
 		// it is thrown by WithTimeoutForNonLongRunningRequests handler when a response has been already sent to the client and the handler timed out
@@ -384,12 +479,15 @@ func TestErrConnKilledHTTP2(t *testing.T) {
 		t.Fatal("expected to receive an error")
 	}
 
-	// we should only get one line for this, not the big stack from before
-	capturedOutput := readStdErr()
-	if strings.Count(capturedOutput, "\n") != 1 {
-		t.Errorf("unexpected output captured actual = %v", capturedOutput)
+	klog.Flush()
+	klog.SetOutput(&bytes.Buffer{}) // prevent further writes into buf
+	capturedOutput := buf.String()
+
+	// We don't expect stack trace from the panic to be included in the log.
+	if isStackTraceLoggedByRuntime(capturedOutput) {
+		t.Errorf("unexpected stack trace in log, actual = %v", capturedOutput)
 	}
-	if !strings.Contains(capturedOutput, `timeout or abort while handling: GET "/"`) {
+	if !strings.Contains(capturedOutput, `timeout or abort while handling: method=GET URI="/" audit-ID=""`) {
 		t.Errorf("unexpected output captured actual = %v", capturedOutput)
 	}
 
@@ -400,6 +498,31 @@ func TestErrConnKilledHTTP2(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected to receive an error")
 	}
+}
+
+func TestResponseWriterDecorator(t *testing.T) {
+	decorator := &baseTimeoutWriter{
+		w: &responsewriter.FakeResponseWriter{},
+	}
+	var w http.ResponseWriter = decorator
+
+	if inner := w.(responsewriter.UserProvidedDecorator).Unwrap(); inner != decorator.w {
+		t.Errorf("Expected the decorator to return the inner http.ResponseWriter object")
+	}
+}
+
+func isStackTraceLoggedByRuntime(message string) bool {
+	// Check the captured output for the following patterns to find out if the
+	// stack trace is included in the log:
+	// - 'Observed a panic' (apimachinery runtime.go logs panic with this message)
+	// - 'goroutine 44 [running]:' (stack trace always starts with this)
+	if strings.Contains(message, "Observed a panic") &&
+		strings.Contains(message, "goroutine") &&
+		strings.Contains(message, "[running]:") {
+		return true
+	}
+
+	return false
 }
 
 var tsCrt = []byte(`-----BEGIN CERTIFICATE-----

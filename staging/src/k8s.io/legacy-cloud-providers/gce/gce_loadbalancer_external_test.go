@@ -1,3 +1,4 @@
+//go:build !providerless
 // +build !providerless
 
 /*
@@ -21,7 +22,6 @@ package gce
 import (
 	"context"
 	"fmt"
-
 	"reflect"
 	"strings"
 	"testing"
@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	compute "google.golang.org/api/compute/v1"
+	cloudprovider "k8s.io/cloud-provider"
 
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud"
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud/meta"
@@ -304,6 +305,86 @@ func createExternalLoadBalancer(gce *Cloud, svc *v1.Service, nodeNames []string,
 	)
 }
 
+func TestShouldNotRecreateLBWhenNetworkTiersMismatch(t *testing.T) {
+	t.Parallel()
+
+	vals := DefaultTestClusterValues()
+	nodeNames := []string{"test-node-1"}
+
+	gce, err := fakeGCECloud(vals)
+	require.NoError(t, err)
+	svc := fakeLoadbalancerService("")
+	nodes, err := createAndInsertNodes(gce, nodeNames, vals.ZoneName)
+	require.NoError(t, err)
+	staticIP := "1.2.3.4"
+	gce.ReserveRegionAddress(&compute.Address{Address: staticIP, Name: "foo", NetworkTier: cloud.NetworkTierStandard.ToGCEValue()}, vals.Region)
+
+	for _, tc := range []struct {
+		desc          string
+		mutateSvc     func(service *v1.Service)
+		expectNetTier string
+		expectError   bool
+	}{
+		{
+			desc: "initial LB config with standard network tier annotation",
+			mutateSvc: func(service *v1.Service) {
+				svc.Annotations[NetworkTierAnnotationKey] = string(NetworkTierAnnotationStandard)
+			},
+			expectNetTier: NetworkTierAnnotationStandard.ToGCEValue(),
+		},
+		{
+			desc: "svc changed to empty network tier annotation",
+			mutateSvc: func(service *v1.Service) {
+				svc.Annotations = make(map[string]string)
+			},
+			expectNetTier: NetworkTierAnnotationStandard.ToGCEValue(),
+		},
+		{
+			desc: "network tier annotation changed to premium",
+			mutateSvc: func(service *v1.Service) {
+				svc.Annotations[NetworkTierAnnotationKey] = string(NetworkTierAnnotationPremium)
+			},
+			expectNetTier: NetworkTierAnnotationPremium.ToGCEValue(),
+		},
+		{
+			desc: " Network tiers annotation set to Standard and reserved static IP is specified",
+			mutateSvc: func(service *v1.Service) {
+				svc.Annotations[NetworkTierAnnotationKey] = string(NetworkTierAnnotationStandard)
+				svc.Spec.LoadBalancerIP = staticIP
+
+			},
+			expectNetTier: NetworkTierAnnotationStandard.ToGCEValue(),
+		},
+		{
+			desc: "svc changed to empty network tier annotation with static ip",
+			mutateSvc: func(service *v1.Service) {
+				svc.Annotations = make(map[string]string)
+			},
+			expectNetTier: NetworkTierAnnotationStandard.ToGCEValue(),
+			expectError:   true,
+		},
+	} {
+		tc.mutateSvc(svc)
+		status, err := gce.ensureExternalLoadBalancer(vals.ClusterName, vals.ClusterID, svc, nil, nodes)
+		if tc.expectError {
+			if err == nil {
+				t.Errorf("for test case %q, expect errror != nil, but got %v", tc.desc, err)
+			}
+		} else {
+			assert.NoError(t, err)
+			assert.NotEmpty(t, status.Ingress)
+		}
+
+		lbName := gce.GetLoadBalancerName(context.TODO(), "", svc)
+		fwdRule, err := gce.GetRegionForwardingRule(lbName, gce.region)
+		assert.NoError(t, err)
+		if fwdRule.NetworkTier != tc.expectNetTier {
+			t.Fatalf("for test case %q, expect fwdRule.NetworkTier == %q, got %v ", tc.desc, tc.expectNetTier, fwdRule.NetworkTier)
+		}
+		assertExternalLbResources(t, gce, svc, vals, nodeNames)
+	}
+}
+
 func TestEnsureExternalLoadBalancer(t *testing.T) {
 	t.Parallel()
 
@@ -497,6 +578,172 @@ func TestEnsureExternalLoadBalancerFailsWithNoNodes(t *testing.T) {
 	_, err = gce.ensureExternalLoadBalancer(vals.ClusterName, vals.ClusterID, svc, nil, []*v1.Node{})
 	require.Error(t, err)
 	assert.EqualError(t, err, errStrLbNoHosts)
+}
+
+func TestEnsureExternalLoadBalancerRBSAnnotation(t *testing.T) {
+	t.Parallel()
+
+	for desc, tc := range map[string]struct {
+		annotations map[string]string
+		wantError   *error
+	}{
+		"When RBS enabled": {
+			annotations: map[string]string{RBSAnnotationKey: RBSEnabled},
+			wantError:   &cloudprovider.ImplementedElsewhere,
+		},
+		"When RBS not enabled": {
+			annotations: map[string]string{},
+			wantError:   nil,
+		},
+		"When RBS annotation has wrong value": {
+			annotations: map[string]string{RBSAnnotationKey: "WrongValue"},
+			wantError:   nil,
+		},
+	} {
+		t.Run(desc, func(t *testing.T) {
+			vals := DefaultTestClusterValues()
+			gce, err := fakeGCECloud(vals)
+			if err != nil {
+				t.Fatalf("fakeGCECloud(%v) returned error %v, want nil", vals, err)
+			}
+
+			nodeNames := []string{"test-node-1"}
+			nodes, err := createAndInsertNodes(gce, nodeNames, vals.ZoneName)
+			if err != nil {
+				t.Fatalf("createAndInsertNodes(_, %v, %v) returned error %v, want nil", nodeNames, vals.ZoneName, err)
+			}
+
+			svc := fakeLoadbalancerService("")
+			svc.Annotations = tc.annotations
+
+			_, err = gce.ensureExternalLoadBalancer(vals.ClusterName, vals.ClusterID, svc, nil, nodes)
+			if tc.wantError != nil {
+				assert.EqualError(t, err, (*tc.wantError).Error())
+			} else {
+				assert.NoError(t, err, "Should not return an error "+desc)
+			}
+
+			err = gce.updateExternalLoadBalancer(vals.ClusterName, svc, nodes)
+			if tc.wantError != nil {
+				assert.EqualError(t, err, (*tc.wantError).Error())
+			} else {
+				assert.NoError(t, err, "Should not return an error "+desc)
+			}
+
+			err = gce.ensureExternalLoadBalancerDeleted(vals.ClusterName, vals.ClusterID, svc)
+			if tc.wantError != nil {
+				assert.EqualError(t, err, (*tc.wantError).Error())
+			} else {
+				assert.NoError(t, err, "Should not return an error "+desc)
+			}
+		})
+	}
+}
+
+func TestEnsureExternalLoadBalancerRBSFinalizer(t *testing.T) {
+	t.Parallel()
+
+	for desc, tc := range map[string]struct {
+		finalizers []string
+		wantError  *error
+	}{
+		"When has ELBRbsFinalizer": {
+			finalizers: []string{NetLBFinalizerV2},
+			wantError:  &cloudprovider.ImplementedElsewhere,
+		},
+		"When has no finalizer": {
+			finalizers: []string{},
+			wantError:  nil,
+		},
+	} {
+		t.Run(desc, func(t *testing.T) {
+			vals := DefaultTestClusterValues()
+
+			gce, err := fakeGCECloud(vals)
+			if err != nil {
+				t.Fatalf("fakeGCECloud(%v) returned error %v, want nil", vals, err)
+			}
+
+			nodeNames := []string{"test-node-1"}
+			nodes, err := createAndInsertNodes(gce, nodeNames, vals.ZoneName)
+			if err != nil {
+				t.Fatalf("createAndInsertNodes(_, %v, %v) returned error %v, want nil", nodeNames, vals.ZoneName, err)
+			}
+
+			svc := fakeLoadbalancerService("")
+			svc.Finalizers = tc.finalizers
+
+			_, err = gce.ensureExternalLoadBalancer(vals.ClusterName, vals.ClusterID, svc, nil, nodes)
+			if tc.wantError != nil {
+				assert.EqualError(t, err, (*tc.wantError).Error())
+			} else {
+				assert.NoError(t, err, "Should not return an error "+desc)
+			}
+
+			err = gce.updateExternalLoadBalancer(vals.ClusterName, svc, nodes)
+			if tc.wantError != nil {
+				assert.EqualError(t, err, (*tc.wantError).Error())
+			} else {
+				assert.NoError(t, err, "Should not return an error "+desc)
+			}
+
+			err = gce.ensureExternalLoadBalancerDeleted(vals.ClusterName, vals.ClusterID, svc)
+			if tc.wantError != nil {
+				assert.EqualError(t, err, (*tc.wantError).Error())
+			} else {
+				assert.NoError(t, err, "Should not return an error "+desc)
+			}
+		})
+	}
+}
+
+func TestEnsureExternalLoadBalancerExistingFwdRule(t *testing.T) {
+	t.Parallel()
+
+	for desc, tc := range map[string]struct {
+		existingForwardingRule *compute.ForwardingRule
+		wantError              *error
+	}{
+		"When has existingForwardingRule with backend service": {
+			existingForwardingRule: &compute.ForwardingRule{
+				BackendService: "exists",
+			},
+			wantError: &cloudprovider.ImplementedElsewhere,
+		},
+		"When has existingForwardingRule with empty backend service": {
+			existingForwardingRule: &compute.ForwardingRule{
+				BackendService: "",
+			},
+			wantError: nil,
+		},
+		"When has no existingForwardingRule": {
+			existingForwardingRule: nil,
+			wantError:              nil,
+		},
+	} {
+		t.Run(desc, func(t *testing.T) {
+			vals := DefaultTestClusterValues()
+
+			gce, err := fakeGCECloud(vals)
+			if err != nil {
+				t.Fatalf("fakeGCECloud(%v) returned error %v, want nil", vals, err)
+			}
+
+			nodeNames := []string{"test-node-1"}
+			nodes, err := createAndInsertNodes(gce, nodeNames, vals.ZoneName)
+			if err != nil {
+				t.Fatalf("createAndInsertNodes(_, %v, %v) returned error %v, want nil", nodeNames, vals.ZoneName, err)
+			}
+
+			svc := fakeLoadbalancerService("")
+			_, err = gce.ensureExternalLoadBalancer(vals.ClusterName, vals.ClusterID, svc, tc.existingForwardingRule, nodes)
+			if tc.wantError != nil {
+				assert.EqualError(t, err, (*tc.wantError).Error())
+			} else {
+				assert.NoError(t, err, "Should not return an error "+desc)
+			}
+		})
+	}
 }
 
 func TestForwardingRuleNeedsUpdate(t *testing.T) {

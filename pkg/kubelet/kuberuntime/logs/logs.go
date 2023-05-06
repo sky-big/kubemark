@@ -32,9 +32,10 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"k8s.io/klog/v2"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	internalapi "k8s.io/cri-api/pkg/apis"
-	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
+	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
+	"k8s.io/kubernetes/pkg/kubelet/cri/remote"
 	"k8s.io/kubernetes/pkg/kubelet/types"
 	"k8s.io/kubernetes/pkg/util/tail"
 )
@@ -122,8 +123,9 @@ var parseFuncs = []parseFunc{
 }
 
 // parseCRILog parses logs in CRI log format. CRI Log format example:
-//   2016-10-06T00:17:09.669794202Z stdout P log content 1
-//   2016-10-06T00:17:09.669794203Z stderr F log content 2
+//
+//	2016-10-06T00:17:09.669794202Z stdout P log content 1
+//	2016-10-06T00:17:09.669794203Z stderr F log content 2
 func parseCRILog(log []byte, msg *logMessage) error {
 	var err error
 	// Parse timestamp
@@ -155,7 +157,7 @@ func parseCRILog(log []byte, msg *logMessage) error {
 	}
 	// Keep this forward compatible.
 	tags := bytes.Split(log[:idx], tagDelimiter)
-	partial := (runtimeapi.LogTag(tags[0]) == runtimeapi.LogTagPartial)
+	partial := runtimeapi.LogTag(tags[0]) == runtimeapi.LogTagPartial
 	// Trim the tailing new line if this is a partial line.
 	if partial && len(log) > 0 && log[len(log)-1] == '\n' {
 		log = log[:len(log)-1]
@@ -181,8 +183,9 @@ type jsonLog struct {
 
 // parseDockerJSONLog parses logs in Docker JSON log format. Docker JSON log format
 // example:
-//   {"log":"content 1","stream":"stdout","time":"2016-10-20T18:39:20.57606443Z"}
-//   {"log":"content 2","stream":"stderr","time":"2016-10-20T18:39:20.57606444Z"}
+//
+//	{"log":"content 1","stream":"stdout","time":"2016-10-20T18:39:20.57606443Z"}
+//	{"log":"content 2","stream":"stderr","time":"2016-10-20T18:39:20.57606444Z"}
 func parseDockerJSONLog(log []byte, msg *logMessage) error {
 	var l = &jsonLog{}
 
@@ -234,13 +237,13 @@ func newLogWriter(stdout io.Writer, stderr io.Writer, opts *LogOptions) *logWrit
 }
 
 // writeLogs writes logs into stdout, stderr.
-func (w *logWriter) write(msg *logMessage) error {
+func (w *logWriter) write(msg *logMessage, addPrefix bool) error {
 	if msg.timestamp.Before(w.opts.since) {
 		// Skip the line because it's older than since
 		return nil
 	}
 	line := msg.log
-	if w.opts.timestamp {
+	if w.opts.timestamp && addPrefix {
 		prefix := append([]byte(msg.timestamp.Format(timeFormatOut)), delimiter[0])
 		line = append(prefix, line...)
 	}
@@ -303,18 +306,21 @@ func ReadLogs(ctx context.Context, path, containerID string, opts *LogOptions, r
 		return fmt.Errorf("failed to seek %d in log file %q: %v", start, path, err)
 	}
 
+	limitedMode := (opts.tail >= 0) && (!opts.follow)
+	limitedNum := opts.tail
 	// Start parsing the logs.
 	r := bufio.NewReader(f)
 	// Do not create watcher here because it is not needed if `Follow` is false.
 	var watcher *fsnotify.Watcher
 	var parse parseFunc
 	var stop bool
+	isNewLine := true
 	found := true
 	writer := newLogWriter(stdout, stderr, opts)
 	msg := &logMessage{}
 	for {
-		if stop {
-			klog.V(2).Infof("Finish parsing log file %q", path)
+		if stop || (limitedMode && limitedNum == 0) {
+			klog.V(2).InfoS("Finished parsing log file", "path", path)
 			return nil
 		}
 		l, err := r.ReadBytes(eol[0])
@@ -362,7 +368,7 @@ func ReadLogs(ctx context.Context, path, containerID string, opts *LogOptions, r
 					defer newF.Close()
 					f.Close()
 					if err := watcher.Remove(f.Name()); err != nil && !os.IsNotExist(err) {
-						klog.Errorf("failed to remove file watch %q: %v", f.Name(), err)
+						klog.ErrorS(err, "Failed to remove file watch", "path", f.Name())
 					}
 					f = newF
 					if err := watcher.Add(f.Name()); err != nil {
@@ -378,7 +384,7 @@ func ReadLogs(ctx context.Context, path, containerID string, opts *LogOptions, r
 			if len(l) == 0 {
 				continue
 			}
-			klog.Warningf("Incomplete line in log file %q: %q", path, l)
+			klog.InfoS("Incomplete line in log file", "path", path, "line", l)
 		}
 		if parse == nil {
 			// Initialize the log parsing function.
@@ -390,29 +396,41 @@ func ReadLogs(ctx context.Context, path, containerID string, opts *LogOptions, r
 		// Parse the log line.
 		msg.reset()
 		if err := parse(l, msg); err != nil {
-			klog.Errorf("Failed with err %v when parsing log for log file %q: %q", err, path, l)
+			klog.ErrorS(err, "Failed when parsing line in log file", "path", path, "line", l)
 			continue
 		}
 		// Write the log line into the stream.
-		if err := writer.write(msg); err != nil {
+		if err := writer.write(msg, isNewLine); err != nil {
 			if err == errMaximumWrite {
-				klog.V(2).Infof("Finish parsing log file %q, hit bytes limit %d(bytes)", path, opts.bytes)
+				klog.V(2).InfoS("Finished parsing log file, hit bytes limit", "path", path, "limit", opts.bytes)
 				return nil
 			}
-			klog.Errorf("Failed with err %v when writing log for log file %q: %+v", err, path, msg)
+			klog.ErrorS(err, "Failed when writing line to log file", "path", path, "line", msg)
 			return err
+		}
+		if limitedMode {
+			limitedNum--
+		}
+		if len(msg.log) > 0 {
+			isNewLine = msg.log[len(msg.log)-1] == eol[0]
+		} else {
+			isNewLine = true
 		}
 	}
 }
 
 func isContainerRunning(id string, r internalapi.RuntimeService) (bool, error) {
-	s, err := r.ContainerStatus(id)
+	resp, err := r.ContainerStatus(id, false)
 	if err != nil {
 		return false, err
 	}
+	status := resp.GetStatus()
+	if status == nil {
+		return false, remote.ErrContainerStatusNil
+	}
 	// Only keep following container log when it is running.
-	if s.State != runtimeapi.ContainerState_CONTAINER_RUNNING {
-		klog.V(5).Infof("Container %q is not running (state=%q)", id, s.State)
+	if status.State != runtimeapi.ContainerState_CONTAINER_RUNNING {
+		klog.V(5).InfoS("Container is not running", "containerId", id, "state", status.State)
 		// Do not return error because it's normal that the container stops
 		// during waiting.
 		return false, nil
@@ -446,10 +464,10 @@ func waitLogs(ctx context.Context, id string, w *fsnotify.Watcher, runtimeServic
 			case fsnotify.Chmod:
 				return true, true, nil
 			default:
-				klog.Errorf("Unexpected fsnotify event: %v, retrying...", e)
+				klog.ErrorS(nil, "Received unexpected fsnotify event, retrying", "event", e)
 			}
 		case err := <-w.Errors:
-			klog.Errorf("Fsnotify watch error: %v, %d error retries remaining", err, errRetry)
+			klog.ErrorS(err, "Received fsnotify watch error, retrying unless no more retries left", "retries", errRetry)
 			if errRetry == 0 {
 				return false, false, err
 			}

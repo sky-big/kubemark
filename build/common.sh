@@ -30,8 +30,6 @@ GROUP_ID=$(id -g)
 DOCKER_OPTS=${DOCKER_OPTS:-""}
 IFS=" " read -r -a DOCKER <<< "docker ${DOCKER_OPTS}"
 DOCKER_HOST=${DOCKER_HOST:-""}
-DOCKER_MACHINE_NAME=${DOCKER_MACHINE_NAME:-"kube-dev"}
-readonly DOCKER_MACHINE_DRIVER=${DOCKER_MACHINE_DRIVER:-"virtualbox --virtualbox-cpu-count -1"}
 
 # This will canonicalize the path
 KUBE_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd -P)
@@ -42,8 +40,8 @@ source "${KUBE_ROOT}/hack/lib/init.sh"
 readonly KUBE_BUILD_IMAGE_REPO=kube-build
 readonly KUBE_BUILD_IMAGE_CROSS_TAG="$(cat "${KUBE_ROOT}/build/build-image/cross/VERSION")"
 
-readonly KUBE_DOCKER_REGISTRY="${KUBE_DOCKER_REGISTRY:-k8s.gcr.io}"
-readonly KUBE_BASE_IMAGE_REGISTRY="${KUBE_BASE_IMAGE_REGISTRY:-k8s.gcr.io/build-image}"
+readonly KUBE_DOCKER_REGISTRY="${KUBE_DOCKER_REGISTRY:-registry.k8s.io}"
+readonly KUBE_BASE_IMAGE_REGISTRY="${KUBE_BASE_IMAGE_REGISTRY:-registry.k8s.io/build-image}"
 
 # This version number is used to cause everyone to rebuild their data containers
 # and build image.  This is especially useful for automated build systems like
@@ -53,6 +51,10 @@ readonly KUBE_BASE_IMAGE_REGISTRY="${KUBE_BASE_IMAGE_REGISTRY:-k8s.gcr.io/build-
 # build/build-image) or change the set of volumes in the data container.
 readonly KUBE_BUILD_IMAGE_VERSION_BASE="$(cat "${KUBE_ROOT}/build/build-image/VERSION")"
 readonly KUBE_BUILD_IMAGE_VERSION="${KUBE_BUILD_IMAGE_VERSION_BASE}-${KUBE_BUILD_IMAGE_CROSS_TAG}"
+
+# Make it possible to override the `kube-cross` image, and tag independent of `KUBE_BASE_IMAGE_REGISTRY`
+readonly KUBE_CROSS_IMAGE="${KUBE_CROSS_IMAGE:-"${KUBE_BASE_IMAGE_REGISTRY}/kube-cross"}"
+readonly KUBE_CROSS_VERSION="${KUBE_CROSS_VERSION:-"${KUBE_BUILD_IMAGE_CROSS_TAG}"}"
 
 # Here we map the output directories across both the local and remote _output
 # directories:
@@ -87,21 +89,36 @@ readonly KUBE_RSYNC_PORT="${KUBE_RSYNC_PORT:-}"
 # mapped to KUBE_RSYNC_PORT via docker networking.
 readonly KUBE_CONTAINER_RSYNC_PORT=8730
 
+# These are the default versions (image tags) for their respective base images.
+readonly __default_debian_iptables_version=bullseye-v1.3.0
+readonly __default_go_runner_version=v2.3.1-go1.19.5-bullseye.0
+readonly __default_setcap_version=bullseye-v1.2.0
+
+# These are the base images for the Docker-wrapped binaries.
+readonly KUBE_GORUNNER_IMAGE="${KUBE_GORUNNER_IMAGE:-$KUBE_BASE_IMAGE_REGISTRY/go-runner:$__default_go_runner_version}"
+readonly KUBE_APISERVER_BASE_IMAGE="${KUBE_APISERVER_BASE_IMAGE:-$KUBE_GORUNNER_IMAGE}"
+readonly KUBE_CONTROLLER_MANAGER_BASE_IMAGE="${KUBE_CONTROLLER_MANAGER_BASE_IMAGE:-$KUBE_GORUNNER_IMAGE}"
+readonly KUBE_SCHEDULER_BASE_IMAGE="${KUBE_SCHEDULER_BASE_IMAGE:-$KUBE_GORUNNER_IMAGE}"
+readonly KUBE_PROXY_BASE_IMAGE="${KUBE_PROXY_BASE_IMAGE:-$KUBE_BASE_IMAGE_REGISTRY/debian-iptables:$__default_debian_iptables_version}"
+
+# This is the image used in a multi-stage build to apply capabilities to Docker-wrapped binaries.
+readonly KUBE_BUILD_SETCAP_IMAGE="${KUBE_BUILD_SETCAP_IMAGE:-$KUBE_BASE_IMAGE_REGISTRY/setcap:$__default_setcap_version}"
+
 # Get the set of master binaries that run in Docker (on Linux)
-# Entry format is "<name-of-binary>,<base-image>".
+# Entry format is "<binary-name>,<base-image>".
 # Binaries are placed in /usr/local/bin inside the image.
+# `make` users can override any or all of the base images using the associated
+# environment variables.
 #
 # $1 - server architecture
 kube::build::get_docker_wrapped_binaries() {
-  local debian_iptables_version=buster-v1.6.7
-  local go_runner_version=v2.3.1-go1.15.15-buster.0
   ### If you change any of these lists, please also update DOCKERIZED_BINARIES
   ### in build/BUILD. And kube::golang::server_image_targets
   local targets=(
-    "kube-apiserver,${KUBE_BASE_IMAGE_REGISTRY}/go-runner:${go_runner_version}"
-    "kube-controller-manager,${KUBE_BASE_IMAGE_REGISTRY}/go-runner:${go_runner_version}"
-    "kube-scheduler,${KUBE_BASE_IMAGE_REGISTRY}/go-runner:${go_runner_version}"
-    "kube-proxy,${KUBE_BASE_IMAGE_REGISTRY}/debian-iptables:${debian_iptables_version}"
+    "kube-apiserver,${KUBE_APISERVER_BASE_IMAGE}"
+    "kube-controller-manager,${KUBE_CONTROLLER_MANAGER_BASE_IMAGE}"
+    "kube-scheduler,${KUBE_SCHEDULER_BASE_IMAGE}"
+    "kube-proxy,${KUBE_PROXY_BASE_IMAGE}"
   )
 
   echo "${targets[@]}"
@@ -172,64 +189,16 @@ function kube::build::verify_prereqs() {
 
 function kube::build::docker_available_on_osx() {
   if [[ -z "${DOCKER_HOST}" ]]; then
-    if [[ -S "/var/run/docker.sock" ]]; then
-      kube::log::status "Using Docker for MacOS"
+    if [[ -S "/var/run/docker.sock" ]] || [[ -S "$(docker context inspect --format  '{{.Endpoints.docker.Host}}' | awk -F 'unix://' '{print $2}')" ]]; then
+      kube::log::status "Using docker on macOS"
       return 0
     fi
 
-    kube::log::status "No docker host is set. Checking options for setting one..."
-    if [[ -z "$(which docker-machine)" ]]; then
-      kube::log::status "It looks like you're running Mac OS X, yet neither Docker for Mac nor docker-machine can be found."
-      kube::log::status "See: https://docs.docker.com/engine/installation/mac/ for installation instructions."
-      return 1
-    elif [[ -n "$(which docker-machine)" ]]; then
-      kube::build::prepare_docker_machine
-    fi
+    kube::log::status "No docker host is set."
+    kube::log::status "It looks like you're running Mac OS X, but Docker for Mac cannot be found."
+    kube::log::status "See: https://docs.docker.com/engine/installation/mac/ for installation instructions."
+    return 1
   fi
-}
-
-function kube::build::prepare_docker_machine() {
-  kube::log::status "docker-machine was found."
-
-  local available_memory_bytes
-  available_memory_bytes=$(sysctl -n hw.memsize 2>/dev/null)
-
-  local bytes_in_mb=1048576
-
-  # Give virtualbox 1/2 the system memory. Its necessary to divide by 2, instead
-  # of multiple by .5, because bash can only multiply by ints.
-  local memory_divisor=2
-
-  local virtualbox_memory_mb=$(( available_memory_bytes / (bytes_in_mb * memory_divisor) ))
-
-  docker-machine inspect "${DOCKER_MACHINE_NAME}" &> /dev/null || {
-    kube::log::status "Creating a machine to build Kubernetes"
-    docker-machine create --driver "${DOCKER_MACHINE_DRIVER}" \
-      --virtualbox-memory "${virtualbox_memory_mb}" \
-      --engine-env HTTP_PROXY="${KUBERNETES_HTTP_PROXY:-}" \
-      --engine-env HTTPS_PROXY="${KUBERNETES_HTTPS_PROXY:-}" \
-      --engine-env NO_PROXY="${KUBERNETES_NO_PROXY:-127.0.0.1}" \
-      "${DOCKER_MACHINE_NAME}" > /dev/null || {
-      kube::log::error "Something went wrong creating a machine."
-      kube::log::error "Try the following: "
-      kube::log::error "docker-machine create -d ${DOCKER_MACHINE_DRIVER} --virtualbox-memory ${virtualbox_memory_mb} ${DOCKER_MACHINE_NAME}"
-      return 1
-    }
-  }
-  docker-machine start "${DOCKER_MACHINE_NAME}" &> /dev/null
-  # it takes `docker-machine env` a few seconds to work if the machine was just started
-  local docker_machine_out
-  while ! docker_machine_out=$(docker-machine env "${DOCKER_MACHINE_NAME}" 2>&1); do
-    if [[ ${docker_machine_out} =~ "Error checking TLS connection" ]]; then
-      echo "${docker_machine_out}"
-      docker-machine regenerate-certs "${DOCKER_MACHINE_NAME}"
-    else
-      sleep 1
-    fi
-  done
-  eval "$(docker-machine env "${DOCKER_MACHINE_NAME}")"
-  kube::log::status "A Docker host using docker-machine named '${DOCKER_MACHINE_NAME}' is ready to go!"
-  return 0
 }
 
 function kube::build::is_osx() {
@@ -408,7 +377,7 @@ function kube::build::build_image() {
   dd if=/dev/urandom bs=512 count=1 2>/dev/null | LC_ALL=C tr -dc 'A-Za-z0-9' | dd bs=32 count=1 2>/dev/null > "${LOCAL_OUTPUT_BUILD_CONTEXT}/rsyncd.password"
   chmod go= "${LOCAL_OUTPUT_BUILD_CONTEXT}/rsyncd.password"
 
-  kube::build::docker_build "${KUBE_BUILD_IMAGE}" "${LOCAL_OUTPUT_BUILD_CONTEXT}" 'false' "--build-arg=KUBE_BUILD_IMAGE_CROSS_TAG=${KUBE_BUILD_IMAGE_CROSS_TAG} --build-arg=KUBE_BASE_IMAGE_REGISTRY=${KUBE_BASE_IMAGE_REGISTRY}"
+  kube::build::docker_build "${KUBE_BUILD_IMAGE}" "${LOCAL_OUTPUT_BUILD_CONTEXT}" 'false' "--build-arg=KUBE_CROSS_IMAGE=${KUBE_CROSS_IMAGE} --build-arg=KUBE_CROSS_VERSION=${KUBE_CROSS_VERSION}"
 
   # Clean up old versions of everything
   kube::build::docker_delete_old_containers "${KUBE_BUILD_CONTAINER_NAME_BASE}" "${KUBE_BUILD_CONTAINER_NAME}"
@@ -424,18 +393,21 @@ function kube::build::build_image() {
 # $1 is the name of the image to build
 # $2 is the location of the "context" directory, with the Dockerfile at the root.
 # $3 is the value to set the --pull flag for docker build; true by default
+# $4 is the set of --build-args for docker.
 function kube::build::docker_build() {
+  kube::util::ensure-docker-buildx
+
   local -r image=$1
   local -r context_dir=$2
   local -r pull="${3:-true}"
   local build_args
   IFS=" " read -r -a build_args <<< "$4"
   readonly build_args
-  local -ra build_cmd=("${DOCKER[@]}" build -t "${image}" "--pull=${pull}" "${build_args[@]}" "${context_dir}")
+  local -ra build_cmd=("${DOCKER[@]}" buildx build --load -t "${image}" "--pull=${pull}" "${build_args[@]}" "${context_dir}")
 
   kube::log::status "Building Docker image ${image}"
   local docker_output
-  docker_output=$("${build_cmd[@]}" 2>&1) || {
+  docker_output=$(DOCKER_CLI_EXPERIMENTAL=enabled "${build_cmd[@]}" 2>&1) || {
     cat <<EOF >&2
 +++ Docker build command failed for ${image}
 
@@ -443,7 +415,7 @@ ${docker_output}
 
 To retry manually, run:
 
-${build_cmd[*]}
+DOCKER_CLI_EXPERIMENTAL=enabled ${build_cmd[*]}
 
 EOF
     return 1
@@ -553,6 +525,7 @@ function kube::build::run_build_command_ex() {
     --env "KUBE_VERBOSE=${KUBE_VERBOSE}"
     --env "KUBE_BUILD_WITH_COVERAGE=${KUBE_BUILD_WITH_COVERAGE:-}"
     --env "KUBE_BUILD_PLATFORMS=${KUBE_BUILD_PLATFORMS:-}"
+    --env "KUBE_CGO_OVERRIDES=' ${KUBE_CGO_OVERRIDES[*]:-} '"
     --env "GOFLAGS=${GOFLAGS:-}"
     --env "GOGCFLAGS=${GOGCFLAGS:-}"
     --env "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-}"
@@ -646,7 +619,7 @@ function kube::build::start_rsyncd_container() {
     return 0
   fi
 
-  kube::log::error "Could not connect to rsync container. See build/README.md for setting up remote Docker engine."
+  kube::log::error "Could not connect to rsync container."
   return 1
 }
 

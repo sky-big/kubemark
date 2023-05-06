@@ -18,7 +18,6 @@ package etcd
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -96,7 +95,7 @@ func TestCreateLocalEtcdStaticPodManifestFile(t *testing.T) {
 	for _, test := range tests {
 		// Execute createStaticPodFunction
 		manifestPath := filepath.Join(tmpdir, kubeadmconstants.ManifestsSubDirName)
-		err := CreateLocalEtcdStaticPodManifestFile(manifestPath, "", "", test.cfg, &kubeadmapi.APIEndpoint{})
+		err := CreateLocalEtcdStaticPodManifestFile(manifestPath, "", "", test.cfg, &kubeadmapi.APIEndpoint{}, false /* IsDryRun */)
 
 		if !test.expectedError {
 			if err != nil {
@@ -138,13 +137,13 @@ func TestCreateLocalEtcdStaticPodManifestFileWithPatches(t *testing.T) {
 	    patched: "true"
 	`)
 
-	err = ioutil.WriteFile(filepath.Join(patchesPath, kubeadmconstants.Etcd+".yaml"), []byte(patchString), 0644)
+	err = os.WriteFile(filepath.Join(patchesPath, kubeadmconstants.Etcd+".yaml"), []byte(patchString), 0644)
 	if err != nil {
 		t.Fatalf("WriteFile returned unexpected error: %v", err)
 	}
 
 	manifestPath := filepath.Join(tmpdir, kubeadmconstants.ManifestsSubDirName)
-	err = CreateLocalEtcdStaticPodManifestFile(manifestPath, patchesPath, "", cfg, &kubeadmapi.APIEndpoint{})
+	err = CreateLocalEtcdStaticPodManifestFile(manifestPath, patchesPath, "", cfg, &kubeadmapi.APIEndpoint{}, false /* IsDryRun */)
 	if err != nil {
 		t.Errorf("Error executing createStaticPodFunction: %v", err)
 		return
@@ -177,6 +176,7 @@ func TestGetEtcdCommand(t *testing.T) {
 			expected: []string{
 				"etcd",
 				"--name=foo",
+				"--experimental-initial-corrupt-check=true",
 				fmt.Sprintf("--listen-client-urls=https://127.0.0.1:%d,https://1.2.3.4:%d", kubeadmconstants.EtcdListenClientPort, kubeadmconstants.EtcdListenClientPort),
 				fmt.Sprintf("--listen-metrics-urls=http://127.0.0.1:%d", kubeadmconstants.EtcdMetricsPort),
 				fmt.Sprintf("--advertise-client-urls=https://1.2.3.4:%d", kubeadmconstants.EtcdListenClientPort),
@@ -206,6 +206,7 @@ func TestGetEtcdCommand(t *testing.T) {
 			expected: []string{
 				"etcd",
 				"--name=foo",
+				"--experimental-initial-corrupt-check=true",
 				fmt.Sprintf("--listen-client-urls=https://127.0.0.1:%d,https://1.2.3.4:%d", kubeadmconstants.EtcdListenClientPort, kubeadmconstants.EtcdListenClientPort),
 				fmt.Sprintf("--listen-metrics-urls=http://127.0.0.1:%d", kubeadmconstants.EtcdMetricsPort),
 				fmt.Sprintf("--advertise-client-urls=https://1.2.3.4:%d", kubeadmconstants.EtcdListenClientPort),
@@ -236,6 +237,7 @@ func TestGetEtcdCommand(t *testing.T) {
 			expected: []string{
 				"etcd",
 				"--name=bar",
+				"--experimental-initial-corrupt-check=true",
 				"--listen-client-urls=https://10.0.1.10:2379",
 				fmt.Sprintf("--listen-metrics-urls=http://127.0.0.1:%d", kubeadmconstants.EtcdMetricsPort),
 				"--advertise-client-urls=https://10.0.1.10:2379",
@@ -261,6 +263,7 @@ func TestGetEtcdCommand(t *testing.T) {
 			expected: []string{
 				"etcd",
 				"--name=foo",
+				"--experimental-initial-corrupt-check=true",
 				fmt.Sprintf("--listen-client-urls=https://[::1]:%d,https://[2001:db8::3]:%d", kubeadmconstants.EtcdListenClientPort, kubeadmconstants.EtcdListenClientPort),
 				fmt.Sprintf("--listen-metrics-urls=http://[::1]:%d", kubeadmconstants.EtcdMetricsPort),
 				fmt.Sprintf("--advertise-client-urls=https://[2001:db8::3]:%d", kubeadmconstants.EtcdListenClientPort),

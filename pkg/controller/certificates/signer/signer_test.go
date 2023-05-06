@@ -17,6 +17,7 @@ limitations under the License.
 package signer
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/x509"
@@ -30,30 +31,23 @@ import (
 	"github.com/google/go-cmp/cmp"
 
 	capi "k8s.io/api/certificates/v1"
-	"k8s.io/apimachinery/pkg/util/clock"
 	"k8s.io/apimachinery/pkg/util/diff"
 	"k8s.io/client-go/kubernetes/fake"
 	testclient "k8s.io/client-go/testing"
 	"k8s.io/client-go/util/cert"
-	"k8s.io/kubernetes/pkg/controller/certificates"
-
+	"k8s.io/client-go/util/certificate/csr"
 	capihelper "k8s.io/kubernetes/pkg/apis/certificates/v1"
+	"k8s.io/kubernetes/pkg/controller/certificates"
+	testingclock "k8s.io/utils/clock/testing"
 )
 
 func TestSigner(t *testing.T) {
-	clock := clock.FakeClock{}
+	fakeClock := testingclock.FakeClock{}
 
 	s, err := newSigner("kubernetes.io/legacy-unknown", "./testdata/ca.crt", "./testdata/ca.key", nil, 1*time.Hour)
 	if err != nil {
 		t.Fatalf("failed to create signer: %v", err)
 	}
-	currCA, err := s.caProvider.currentCA()
-	if err != nil {
-		t.Fatal(err)
-	}
-	currCA.Now = clock.Now
-	currCA.Backdate = 0
-	s.caProvider.caValue.Store(currCA)
 
 	csrb, err := ioutil.ReadFile("./testdata/kubelet.csr")
 	if err != nil {
@@ -69,7 +63,11 @@ func TestSigner(t *testing.T) {
 		capi.UsageKeyEncipherment,
 		capi.UsageServerAuth,
 		capi.UsageClientAuth,
-	})
+	},
+		// requesting a duration that is greater than TTL is ignored
+		csr.DurationToExpirationSeconds(3*time.Hour),
+		fakeClock.Now,
+	)
 	if err != nil {
 		t.Fatalf("failed to sign CSR: %v", err)
 	}
@@ -94,7 +92,8 @@ func TestSigner(t *testing.T) {
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		BasicConstraintsValid: true,
-		NotAfter:              clock.Now().Add(1 * time.Hour),
+		NotBefore:             fakeClock.Now().Add(-5 * time.Minute),
+		NotAfter:              fakeClock.Now().Add(1 * time.Hour),
 		PublicKeyAlgorithm:    x509.ECDSA,
 		SignatureAlgorithm:    x509.SHA256WithRSA,
 		MaxPathLen:            -1,
@@ -293,7 +292,8 @@ func TestHandle(t *testing.T) {
 			}
 
 			csr := makeTestCSR(csrBuilder{cn: c.commonName, signerName: c.signerName, approved: c.approved, failed: c.failed, usages: c.usages, org: c.org, dnsNames: c.dnsNames})
-			if err := s.handle(csr); err != nil && !c.err {
+			ctx := context.TODO()
+			if err := s.handle(ctx, csr); err != nil && !c.err {
 				t.Errorf("unexpected err: %v", err)
 			}
 			c.verify(t, client.Actions())
@@ -350,4 +350,72 @@ func makeTestCSR(b csrBuilder) *capi.CertificateSigningRequest {
 		})
 	}
 	return csr
+}
+
+func Test_signer_duration(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		certTTL           time.Duration
+		expirationSeconds *int32
+		want              time.Duration
+	}{
+		{
+			name:              "can request shorter duration than TTL",
+			certTTL:           time.Hour,
+			expirationSeconds: csr.DurationToExpirationSeconds(30 * time.Minute),
+			want:              30 * time.Minute,
+		},
+		{
+			name:              "cannot request longer duration than TTL",
+			certTTL:           time.Hour,
+			expirationSeconds: csr.DurationToExpirationSeconds(3 * time.Hour),
+			want:              time.Hour,
+		},
+		{
+			name:              "cannot request negative duration",
+			certTTL:           time.Hour,
+			expirationSeconds: csr.DurationToExpirationSeconds(-time.Minute),
+			want:              10 * time.Minute,
+		},
+		{
+			name:              "cannot request duration less than 10 mins",
+			certTTL:           time.Hour,
+			expirationSeconds: csr.DurationToExpirationSeconds(10*time.Minute - time.Second),
+			want:              10 * time.Minute,
+		},
+		{
+			name:              "can request duration of exactly 10 mins",
+			certTTL:           time.Hour,
+			expirationSeconds: csr.DurationToExpirationSeconds(10 * time.Minute),
+			want:              10 * time.Minute,
+		},
+		{
+			name:              "can request duration equal to the default",
+			certTTL:           time.Hour,
+			expirationSeconds: csr.DurationToExpirationSeconds(time.Hour),
+			want:              time.Hour,
+		},
+		{
+			name:              "can choose not to request a duration to get the default",
+			certTTL:           time.Hour,
+			expirationSeconds: nil,
+			want:              time.Hour,
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := &signer{
+				certTTL: tt.certTTL,
+			}
+			if got := s.duration(tt.expirationSeconds); got != tt.want {
+				t.Errorf("duration() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }

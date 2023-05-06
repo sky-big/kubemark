@@ -17,17 +17,18 @@ limitations under the License.
 package main
 
 import (
-	"flag"
+	"os"
 
 	"github.com/spf13/cobra"
 
-	"k8s.io/klog/v2"
+	"k8s.io/component-base/cli"
 	auditproxy "k8s.io/kubernetes/test/images/agnhost/audit-proxy"
 	"k8s.io/kubernetes/test/images/agnhost/connect"
 	crdconvwebhook "k8s.io/kubernetes/test/images/agnhost/crd-conversion-webhook"
 	"k8s.io/kubernetes/test/images/agnhost/dns"
 	"k8s.io/kubernetes/test/images/agnhost/entrypoint-tester"
 	"k8s.io/kubernetes/test/images/agnhost/fakegitserver"
+	grpchealthchecking "k8s.io/kubernetes/test/images/agnhost/grpc-health-checking"
 	"k8s.io/kubernetes/test/images/agnhost/guestbook"
 	"k8s.io/kubernetes/test/images/agnhost/inclusterclient"
 	"k8s.io/kubernetes/test/images/agnhost/liveness"
@@ -48,10 +49,12 @@ import (
 	"k8s.io/kubernetes/test/images/agnhost/webhook"
 )
 
+var Version = "development"
+
 func main() {
 	rootCmd := &cobra.Command{
 		Use:     "app",
-		Version: "2.25",
+		Version: Version,
 	}
 
 	rootCmd.AddCommand(auditproxy.CmdAuditProxy)
@@ -80,11 +83,10 @@ func main() {
 	rootCmd.AddCommand(testwebserver.CmdTestWebserver)
 	rootCmd.AddCommand(webhook.CmdWebhook)
 	rootCmd.AddCommand(openidmetadata.CmdTestServiceAccountIssuerDiscovery)
+	rootCmd.AddCommand(grpchealthchecking.CmdGrpcHealthChecking)
 
 	// NOTE(claudiub): Some tests are passing logging related flags, so we need to be able to
 	// accept them. This will also include them in the printed help.
-	loggingFlags := &flag.FlagSet{}
-	klog.InitFlags(loggingFlags)
-	rootCmd.PersistentFlags().AddGoFlagSet(loggingFlags)
-	rootCmd.Execute()
+	code := cli.Run(rootCmd)
+	os.Exit(code)
 }

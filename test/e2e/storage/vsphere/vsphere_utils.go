@@ -196,14 +196,14 @@ func getVSpherePersistentVolumeClaimSpec(namespace string, labels map[string]str
 }
 
 // function to write content to the volume backed by given PVC
-func writeContentToVSpherePV(client clientset.Interface, pvc *v1.PersistentVolumeClaim, expectedContent string) {
-	utils.RunInPodWithVolume(client, pvc.Namespace, pvc.Name, "echo "+expectedContent+" > /mnt/test/data")
+func writeContentToVSpherePV(client clientset.Interface, timeouts *framework.TimeoutContext, pvc *v1.PersistentVolumeClaim, expectedContent string) {
+	utils.RunInPodWithVolume(client, timeouts, pvc.Namespace, pvc.Name, "echo "+expectedContent+" > /mnt/test/data")
 	framework.Logf("Done with writing content to volume")
 }
 
 // function to verify content is matching on the volume backed for given PVC
-func verifyContentOfVSpherePV(client clientset.Interface, pvc *v1.PersistentVolumeClaim, expectedContent string) {
-	utils.RunInPodWithVolume(client, pvc.Namespace, pvc.Name, "grep '"+expectedContent+"' /mnt/test/data")
+func verifyContentOfVSpherePV(client clientset.Interface, timeouts *framework.TimeoutContext, pvc *v1.PersistentVolumeClaim, expectedContent string) {
+	utils.RunInPodWithVolume(client, timeouts, pvc.Namespace, pvc.Name, "grep '"+expectedContent+"' /mnt/test/data")
 	framework.Logf("Successfully verified content of the volume")
 }
 
@@ -226,7 +226,7 @@ func getVSphereStorageClassSpec(name string, scParameters map[string]string, zon
 		term := v1.TopologySelectorTerm{
 			MatchLabelExpressions: []v1.TopologySelectorLabelRequirement{
 				{
-					Key:    v1.LabelFailureDomainBetaZone,
+					Key:    v1.LabelTopologyZone,
 					Values: zones,
 				},
 			},
@@ -477,7 +477,7 @@ func getPathFromVMDiskPath(vmDiskPath string) string {
 	return datastorePathObj.Path
 }
 
-//getDatastorePathObjFromVMDiskPath gets the datastorePathObj from VM disk path.
+// getDatastorePathObjFromVMDiskPath gets the datastorePathObj from VM disk path.
 func getDatastorePathObjFromVMDiskPath(vmDiskPath string) (*object.DatastorePath, error) {
 	datastorePathObj := new(object.DatastorePath)
 	isSuccess := datastorePathObj.FromString(vmDiskPath)
@@ -513,7 +513,7 @@ func formatVirtualDiskUUID(uuid string) string {
 	return strings.ToLower(uuidWithNoHypens)
 }
 
-//isValidUUID checks if the string is a valid UUID.
+// isValidUUID checks if the string is a valid UUID.
 func isValidUUID(uuid string) bool {
 	r := regexp.MustCompile("^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$")
 	return r.MatchString(uuid)
@@ -762,7 +762,7 @@ func GetReadySchedulableNodeInfos() []*NodeInfo {
 }
 
 // GetReadySchedulableRandomNodeInfo returns NodeInfo object for one of the Ready and Schedulable Node.
-// if multiple nodes are present with Ready and Scheduable state then one of the Node is selected randomly
+// if multiple nodes are present with Ready and Schedulable state then one of the Node is selected randomly
 // and it's associated NodeInfo object is returned.
 func GetReadySchedulableRandomNodeInfo() *NodeInfo {
 	nodesInfo := GetReadySchedulableNodeInfos()

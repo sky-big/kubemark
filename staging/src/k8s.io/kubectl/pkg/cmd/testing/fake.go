@@ -50,6 +50,8 @@ import (
 	"k8s.io/kubectl/pkg/util/openapi"
 	openapitesting "k8s.io/kubectl/pkg/util/openapi/testing"
 	"k8s.io/kubectl/pkg/validation"
+
+	openapi_v2 "github.com/google/gnostic/openapiv2"
 )
 
 // InternalType is the schema for internal type
@@ -373,11 +375,6 @@ func (d *fakeCachedDiscoveryClient) Fresh() bool {
 func (d *fakeCachedDiscoveryClient) Invalidate() {
 }
 
-// Deprecated: use ServerGroupsAndResources instead.
-func (d *fakeCachedDiscoveryClient) ServerResources() ([]*metav1.APIResourceList, error) {
-	return []*metav1.APIResourceList{}, nil
-}
-
 func (d *fakeCachedDiscoveryClient) ServerGroupsAndResources() ([]*metav1.APIGroup, []*metav1.APIResourceList, error) {
 	return []*metav1.APIGroup{}, []*metav1.APIResourceList{}, nil
 }
@@ -398,6 +395,7 @@ type TestFactory struct {
 
 	UnstructuredClientForMappingFunc resource.FakeClientFunc
 	OpenAPISchemaFunc                func() (openapi.Resources, error)
+	FakeOpenAPIGetter                discovery.OpenAPISchemaInterface
 }
 
 // NewTestFactory returns an initialized TestFactory instance
@@ -440,6 +438,12 @@ func NewTestFactory() *TestFactory {
 // WithNamespace is used to mention namespace reactively
 func (f *TestFactory) WithNamespace(ns string) *TestFactory {
 	f.kubeConfigFlags.WithNamespace(ns)
+	return f
+}
+
+// WithClientConfig sets the client config to use
+func (f *TestFactory) WithClientConfig(clientConfig clientcmd.ClientConfig) *TestFactory {
+	f.kubeConfigFlags.WithClientConfig(clientConfig)
 	return f
 }
 
@@ -490,7 +494,7 @@ func (f *TestFactory) UnstructuredClientForMapping(mapping *meta.RESTMapping) (r
 }
 
 // Validator returns a validation schema
-func (f *TestFactory) Validator(validate bool) (validation.Schema, error) {
+func (f *TestFactory) Validator(validateDirective string, verifier *resource.QueryParamVerifier) (validation.Schema, error) {
 	return validation.NullSchema{}, nil
 }
 
@@ -500,6 +504,23 @@ func (f *TestFactory) OpenAPISchema() (openapi.Resources, error) {
 		return f.OpenAPISchemaFunc()
 	}
 	return openapitesting.EmptyResources{}, nil
+}
+
+type EmptyOpenAPI struct{}
+
+func (EmptyOpenAPI) OpenAPISchema() (*openapi_v2.Document, error) {
+	return &openapi_v2.Document{}, nil
+}
+
+func (f *TestFactory) OpenAPIGetter() discovery.OpenAPISchemaInterface {
+	if f.FakeOpenAPIGetter != nil {
+		return f.FakeOpenAPIGetter
+	}
+	client, err := f.ToDiscoveryClient()
+	if err != nil {
+		return EmptyOpenAPI{}
+	}
+	return client
 }
 
 // NewBuilder returns an initialized resource.Builder instance
@@ -534,7 +555,6 @@ func (f *TestFactory) KubernetesClientSet() (*kubernetes.Clientset, error) {
 	clientset.AutoscalingV1().RESTClient().(*restclient.RESTClient).Client = fakeClient.Client
 	clientset.AutoscalingV2beta1().RESTClient().(*restclient.RESTClient).Client = fakeClient.Client
 	clientset.BatchV1().RESTClient().(*restclient.RESTClient).Client = fakeClient.Client
-	clientset.BatchV2alpha1().RESTClient().(*restclient.RESTClient).Client = fakeClient.Client
 	clientset.CertificatesV1().RESTClient().(*restclient.RESTClient).Client = fakeClient.Client
 	clientset.CertificatesV1beta1().RESTClient().(*restclient.RESTClient).Client = fakeClient.Client
 	clientset.ExtensionsV1beta1().RESTClient().(*restclient.RESTClient).Client = fakeClient.Client
@@ -546,6 +566,7 @@ func (f *TestFactory) KubernetesClientSet() (*kubernetes.Clientset, error) {
 	clientset.AppsV1beta2().RESTClient().(*restclient.RESTClient).Client = fakeClient.Client
 	clientset.AppsV1().RESTClient().(*restclient.RESTClient).Client = fakeClient.Client
 	clientset.PolicyV1beta1().RESTClient().(*restclient.RESTClient).Client = fakeClient.Client
+	clientset.PolicyV1().RESTClient().(*restclient.RESTClient).Client = fakeClient.Client
 	clientset.DiscoveryClient.RESTClient().(*restclient.RESTClient).Client = fakeClient.Client
 
 	return clientset, nil

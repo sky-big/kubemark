@@ -21,9 +21,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/pkg/errors"
-
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	clientset "k8s.io/client-go/kubernetes"
 )
 
@@ -78,7 +76,7 @@ func SetupProviderConfig(providerName string) (ProviderInterface, error) {
 	defer mutex.Unlock()
 	factory, ok := providers[providerName]
 	if !ok {
-		return nil, errors.Wrapf(os.ErrNotExist, "The provider %s is unknown.", providerName)
+		return nil, fmt.Errorf("The provider %s is unknown: %w", providerName, os.ErrNotExist)
 	}
 	provider, err := factory()
 
@@ -99,6 +97,9 @@ type ProviderInterface interface {
 
 	CreatePD(zone string) (string, error)
 	DeletePD(pdName string) error
+	CreateShare() (string, string, string, error)
+	DeleteShare(accountName, shareName string) error
+
 	CreatePVSource(zone, diskName string) (*v1.PersistentVolumeSource, error)
 	DeletePVSource(pvSource *v1.PersistentVolumeSource) error
 
@@ -137,6 +138,14 @@ func (n NullProvider) GroupSize(group string) (int, error) {
 // DeleteNode is a base implementation which deletes a node.
 func (n NullProvider) DeleteNode(node *v1.Node) error {
 	return fmt.Errorf("provider does not support DeleteNode")
+}
+
+func (n NullProvider) CreateShare() (string, string, string, error) {
+	return "", "", "", fmt.Errorf("provider does not support volume creation")
+}
+
+func (n NullProvider) DeleteShare(accountName, shareName string) error {
+	return fmt.Errorf("provider does not support volume deletion")
 }
 
 // CreatePD is a base implementation which creates PD.

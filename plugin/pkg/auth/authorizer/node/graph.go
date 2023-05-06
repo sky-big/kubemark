@@ -21,10 +21,9 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/component-helpers/storage/ephemeral"
 	pvutil "k8s.io/kubernetes/pkg/api/v1/persistentvolume"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
-	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/third_party/forked/gonum/graph"
 	"k8s.io/kubernetes/third_party/forked/gonum/graph/simple"
 )
@@ -328,12 +327,12 @@ func (g *Graph) recomputeDestinationIndex_locked(n graph.Node) {
 // AddPod should only be called once spec.NodeName is populated.
 // It sets up edges for the following relationships (which are immutable for a pod once bound to a node):
 //
-//   pod -> node
+//	pod -> node
 //
-//   secret    -> pod
-//   configmap -> pod
-//   pvc       -> pod
-//   svcacct   -> pod
+//	secret    -> pod
+//	configmap -> pod
+//	pvc       -> pod
+//	svcacct   -> pod
 func (g *Graph) AddPod(pod *corev1.Pod) {
 	start := time.Now()
 	defer func() {
@@ -385,8 +384,8 @@ func (g *Graph) AddPod(pod *corev1.Pod) {
 		claimName := ""
 		if v.PersistentVolumeClaim != nil {
 			claimName = v.PersistentVolumeClaim.ClaimName
-		} else if v.Ephemeral != nil && utilfeature.DefaultFeatureGate.Enabled(features.GenericEphemeralVolume) {
-			claimName = pod.Name + "-" + v.Name
+		} else if v.Ephemeral != nil {
+			claimName = ephemeral.VolumeClaimName(pod, &v)
 		}
 		if claimName != "" {
 			pvcVertex := g.getOrCreateVertex_locked(pvcVertexType, pod.Namespace, claimName)
@@ -408,9 +407,9 @@ func (g *Graph) DeletePod(name, namespace string) {
 
 // AddPV sets up edges for the following relationships:
 //
-//   secret -> pv
+//	secret -> pv
 //
-//   pv -> pvc
+//	pv -> pvc
 func (g *Graph) AddPV(pv *corev1.PersistentVolume) {
 	start := time.Now()
 	defer func() {
@@ -449,7 +448,7 @@ func (g *Graph) DeletePV(name string) {
 
 // AddVolumeAttachment sets up edges for the following relationships:
 //
-//   volume attachment -> node
+//	volume attachment -> node
 func (g *Graph) AddVolumeAttachment(attachmentName, nodeName string) {
 	start := time.Now()
 	defer func() {

@@ -27,8 +27,9 @@ import (
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	e2evolume "k8s.io/kubernetes/test/e2e/framework/volume"
-	"k8s.io/kubernetes/test/e2e/storage/testpatterns"
+	storageframework "k8s.io/kubernetes/test/e2e/storage/framework"
 	storageutils "k8s.io/kubernetes/test/e2e/storage/utils"
+	admissionapi "k8s.io/pod-security-admission/api"
 	utilpointer "k8s.io/utils/pointer"
 )
 
@@ -42,19 +43,17 @@ const (
 )
 
 type fsGroupChangePolicyTestSuite struct {
-	tsInfo TestSuiteInfo
+	tsInfo storageframework.TestSuiteInfo
 }
 
-var _ TestSuite = &fsGroupChangePolicyTestSuite{}
+var _ storageframework.TestSuite = &fsGroupChangePolicyTestSuite{}
 
-// InitFsGroupChangePolicyTestSuite returns fsGroupChangePolicyTestSuite that implements TestSuite interface
-func InitFsGroupChangePolicyTestSuite() TestSuite {
+// InitCustomFsGroupChangePolicyTestSuite returns fsGroupChangePolicyTestSuite that implements TestSuite interface
+func InitCustomFsGroupChangePolicyTestSuite(patterns []storageframework.TestPattern) storageframework.TestSuite {
 	return &fsGroupChangePolicyTestSuite{
-		tsInfo: TestSuiteInfo{
-			Name: "fsgroupchangepolicy",
-			TestPatterns: []testpatterns.TestPattern{
-				testpatterns.DefaultFsDynamicPV,
-			},
+		tsInfo: storageframework.TestSuiteInfo{
+			Name:         "fsgroupchangepolicy",
+			TestPatterns: patterns,
 			SupportedSizeRange: e2evolume.SizeRange{
 				Min: "1Mi",
 			},
@@ -62,47 +61,52 @@ func InitFsGroupChangePolicyTestSuite() TestSuite {
 	}
 }
 
-func (s *fsGroupChangePolicyTestSuite) GetTestSuiteInfo() TestSuiteInfo {
+// InitFsGroupChangePolicyTestSuite returns fsGroupChangePolicyTestSuite that implements TestSuite interface
+func InitFsGroupChangePolicyTestSuite() storageframework.TestSuite {
+	patterns := []storageframework.TestPattern{
+		storageframework.DefaultFsDynamicPV,
+	}
+	return InitCustomFsGroupChangePolicyTestSuite(patterns)
+}
+
+func (s *fsGroupChangePolicyTestSuite) GetTestSuiteInfo() storageframework.TestSuiteInfo {
 	return s.tsInfo
 }
 
-func (s *fsGroupChangePolicyTestSuite) SkipRedundantSuite(driver TestDriver, pattern testpatterns.TestPattern) {
-	skipVolTypePatterns(pattern, driver, testpatterns.NewVolTypeMap(testpatterns.CSIInlineVolume, testpatterns.GenericEphemeralVolume))
+func (s *fsGroupChangePolicyTestSuite) SkipUnsupportedTests(driver storageframework.TestDriver, pattern storageframework.TestPattern) {
+	skipVolTypePatterns(pattern, driver, storageframework.NewVolTypeMap(storageframework.CSIInlineVolume, storageframework.GenericEphemeralVolume))
+	dInfo := driver.GetDriverInfo()
+	if !dInfo.Capabilities[storageframework.CapFsGroup] {
+		e2eskipper.Skipf("Driver %q does not support FsGroup - skipping", dInfo.Name)
+	}
+
+	if pattern.VolMode == v1.PersistentVolumeBlock {
+		e2eskipper.Skipf("Test does not support non-filesystem volume mode - skipping")
+	}
+
+	if pattern.VolType != storageframework.DynamicPV {
+		e2eskipper.Skipf("Suite %q does not support %v", s.tsInfo.Name, pattern.VolType)
+	}
+
+	_, ok := driver.(storageframework.DynamicPVTestDriver)
+	if !ok {
+		e2eskipper.Skipf("Driver %s doesn't support %v -- skipping", dInfo.Name, pattern.VolType)
+	}
 }
 
-func (s *fsGroupChangePolicyTestSuite) DefineTests(driver TestDriver, pattern testpatterns.TestPattern) {
+func (s *fsGroupChangePolicyTestSuite) DefineTests(driver storageframework.TestDriver, pattern storageframework.TestPattern) {
 	type local struct {
-		config        *PerTestConfig
+		config        *storageframework.PerTestConfig
 		driverCleanup func()
-		driver        TestDriver
-		resource      *VolumeResource
+		driver        storageframework.TestDriver
+		resource      *storageframework.VolumeResource
 	}
 	var l local
-	ginkgo.BeforeEach(func() {
-		dInfo := driver.GetDriverInfo()
-		if !dInfo.Capabilities[CapFsGroup] {
-			e2eskipper.Skipf("Driver %q does not support FsGroup - skipping", dInfo.Name)
-		}
 
-		if pattern.VolMode == v1.PersistentVolumeBlock {
-			e2eskipper.Skipf("Test does not support non-filesystem volume mode - skipping")
-		}
-
-		if pattern.VolType != testpatterns.DynamicPV {
-			e2eskipper.Skipf("Suite %q does not support %v", s.tsInfo.Name, pattern.VolType)
-		}
-
-		_, ok := driver.(DynamicPVTestDriver)
-		if !ok {
-			e2eskipper.Skipf("Driver %s doesn't support %v -- skipping", dInfo.Name, pattern.VolType)
-		}
-	})
-
-	// This intentionally comes after checking the preconditions because it
-	// registers its own BeforeEach which creates the namespace. Beware that it
-	// also registers an AfterEach which renders f unusable. Any code using
+	// Beware that it also registers an AfterEach which renders f unusable. Any code using
 	// f must run inside an It or Context callback.
-	f := framework.NewDefaultFramework("fsgroupchangepolicy")
+	f := framework.NewFrameworkWithCustomTimeouts("fsgroupchangepolicy", storageframework.GetDriverTimeouts(driver))
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 
 	init := func() {
 		e2eskipper.SkipIfNodeOSDistroIs("windows")
@@ -110,7 +114,7 @@ func (s *fsGroupChangePolicyTestSuite) DefineTests(driver TestDriver, pattern te
 		l.driver = driver
 		l.config, l.driverCleanup = driver.PrepareTest(f)
 		testVolumeSizeRange := s.GetTestSuiteInfo().SupportedSizeRange
-		l.resource = CreateVolumeResource(l.driver, l.config, pattern, testVolumeSizeRange)
+		l.resource = storageframework.CreateVolumeResource(l.driver, l.config, pattern, testVolumeSizeRange)
 	}
 
 	cleanup := func() {
@@ -123,7 +127,7 @@ func (s *fsGroupChangePolicyTestSuite) DefineTests(driver TestDriver, pattern te
 		}
 
 		if l.driverCleanup != nil {
-			errs = append(errs, tryFunc(l.driverCleanup))
+			errs = append(errs, storageutils.TryFunc(l.driverCleanup))
 			l.driverCleanup = nil
 		}
 
@@ -139,6 +143,11 @@ func (s *fsGroupChangePolicyTestSuite) DefineTests(driver TestDriver, pattern te
 		secondPodFsGroup                  int    // FsGroup of the second pod
 		finalExpectedRootDirFileOwnership int    // Final expcted ownership of the file in the root directory (/mnt/volume1/file1), as part of the second pod
 		finalExpectedSubDirFileOwnership  int    // Final expcted ownership of the file in the sub directory (/mnt/volume1/subdir/file2), as part of the second pod
+		// Whether the test can run for drivers that support volumeMountGroup capability.
+		// For CSI drivers that support volumeMountGroup:
+		// * OnRootMismatch policy is not supported.
+		// * It may not be possible to chgrp after mounting a volume.
+		supportsVolumeMountGroup bool
 	}{
 		// Test cases for 'Always' policy
 		{
@@ -148,9 +157,10 @@ func (s *fsGroupChangePolicyTestSuite) DefineTests(driver TestDriver, pattern te
 			secondPodFsGroup:                  2000,
 			finalExpectedRootDirFileOwnership: 2000,
 			finalExpectedSubDirFileOwnership:  2000,
+			supportsVolumeMountGroup:          true,
 		},
 		{
-			name:                              "pod created with an initial fsgroup, volume contents ownership changed in first pod, new pod with same fsgroup applied to the volume contents",
+			name:                              "pod created with an initial fsgroup, volume contents ownership changed via chgrp in first pod, new pod with same fsgroup applied to the volume contents",
 			podfsGroupChangePolicy:            "Always",
 			initialPodFsGroup:                 1000,
 			changedRootDirFileOwnership:       2000,
@@ -160,7 +170,7 @@ func (s *fsGroupChangePolicyTestSuite) DefineTests(driver TestDriver, pattern te
 			finalExpectedSubDirFileOwnership:  1000,
 		},
 		{
-			name:                              "pod created with an initial fsgroup, volume contents ownership changed in first pod, new pod with different fsgroup applied to the volume contents",
+			name:                              "pod created with an initial fsgroup, volume contents ownership changed via chgrp in first pod, new pod with different fsgroup applied to the volume contents",
 			podfsGroupChangePolicy:            "Always",
 			initialPodFsGroup:                 1000,
 			changedRootDirFileOwnership:       2000,
@@ -179,7 +189,7 @@ func (s *fsGroupChangePolicyTestSuite) DefineTests(driver TestDriver, pattern te
 			finalExpectedSubDirFileOwnership:  2000,
 		},
 		{
-			name:                              "pod created with an initial fsgroup, volume contents ownership changed in first pod, new pod with same fsgroup skips ownership changes to the volume contents",
+			name:                              "pod created with an initial fsgroup, volume contents ownership changed via chgrp in first pod, new pod with same fsgroup skips ownership changes to the volume contents",
 			podfsGroupChangePolicy:            "OnRootMismatch",
 			initialPodFsGroup:                 1000,
 			changedRootDirFileOwnership:       2000,
@@ -189,7 +199,7 @@ func (s *fsGroupChangePolicyTestSuite) DefineTests(driver TestDriver, pattern te
 			finalExpectedSubDirFileOwnership:  3000,
 		},
 		{
-			name:                              "pod created with an initial fsgroup, volume contents ownership changed in first pod, new pod with different fsgroup applied to the volume contents",
+			name:                              "pod created with an initial fsgroup, volume contents ownership changed via chgrp in first pod, new pod with different fsgroup applied to the volume contents",
 			podfsGroupChangePolicy:            "OnRootMismatch",
 			initialPodFsGroup:                 1000,
 			changedRootDirFileOwnership:       2000,
@@ -204,10 +214,16 @@ func (s *fsGroupChangePolicyTestSuite) DefineTests(driver TestDriver, pattern te
 		test := t
 		testCaseName := fmt.Sprintf("(%s)[LinuxOnly], %s", test.podfsGroupChangePolicy, test.name)
 		ginkgo.It(testCaseName, func() {
+			dInfo := driver.GetDriverInfo()
+			policy := v1.PodFSGroupChangePolicy(test.podfsGroupChangePolicy)
+
+			if dInfo.Capabilities[storageframework.CapVolumeMountGroup] &&
+				!test.supportsVolumeMountGroup {
+				e2eskipper.Skipf("Driver %q supports VolumeMountGroup, which is incompatible with this test - skipping", dInfo.Name)
+			}
+
 			init()
 			defer cleanup()
-
-			policy := v1.PodFSGroupChangePolicy(test.podfsGroupChangePolicy)
 			podConfig := e2epod.Config{
 				NS:                     f.Namespace.Name,
 				NodeSelection:          l.config.ClientNodeSelection,
@@ -244,7 +260,7 @@ func (s *fsGroupChangePolicyTestSuite) DefineTests(driver TestDriver, pattern te
 func createPodAndVerifyContentGid(f *framework.Framework, podConfig *e2epod.Config, createInitialFiles bool, expectedRootDirFileOwnership, expectedSubDirFileOwnership string) *v1.Pod {
 	podFsGroup := strconv.FormatInt(*podConfig.FsGroup, 10)
 	ginkgo.By(fmt.Sprintf("Creating Pod in namespace %s with fsgroup %s", podConfig.NS, podFsGroup))
-	pod, err := e2epod.CreateSecPodWithNodeSelection(f.ClientSet, podConfig, framework.PodStartTimeout)
+	pod, err := e2epod.CreateSecPodWithNodeSelection(f.ClientSet, podConfig, f.Timeouts.PodStart)
 	framework.ExpectNoError(err)
 	framework.Logf("Pod %s/%s started successfully", pod.Namespace, pod.Name)
 
@@ -252,15 +268,15 @@ func createPodAndVerifyContentGid(f *framework.Framework, podConfig *e2epod.Conf
 		ginkgo.By(fmt.Sprintf("Creating a sub-directory and file, and verifying their ownership is %s", podFsGroup))
 		cmd := fmt.Sprintf("touch %s", rootDirFilePath)
 		var err error
-		_, _, err = storageutils.PodExec(f, pod, cmd)
+		_, _, err = e2evolume.PodExec(f, pod, cmd)
 		framework.ExpectNoError(err)
 		storageutils.VerifyFilePathGidInPod(f, rootDirFilePath, podFsGroup, pod)
 
 		cmd = fmt.Sprintf("mkdir %s", subdir)
-		_, _, err = storageutils.PodExec(f, pod, cmd)
+		_, _, err = e2evolume.PodExec(f, pod, cmd)
 		framework.ExpectNoError(err)
 		cmd = fmt.Sprintf("touch %s", subDirFilePath)
-		_, _, err = storageutils.PodExec(f, pod, cmd)
+		_, _, err = e2evolume.PodExec(f, pod, cmd)
 		framework.ExpectNoError(err)
 		storageutils.VerifyFilePathGidInPod(f, subDirFilePath, podFsGroup, pod)
 		return pod

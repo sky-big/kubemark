@@ -34,6 +34,7 @@ import (
 	"k8s.io/client-go/informers"
 	corev1lister "k8s.io/client-go/listers/core/v1"
 	"k8s.io/component-base/featuregate"
+	kubeletapis "k8s.io/kubelet/pkg/apis"
 	podutil "k8s.io/kubernetes/pkg/api/pod"
 	authenticationapi "k8s.io/kubernetes/pkg/apis/authentication"
 	coordapi "k8s.io/kubernetes/pkg/apis/coordination"
@@ -42,7 +43,6 @@ import (
 	storage "k8s.io/kubernetes/pkg/apis/storage"
 	"k8s.io/kubernetes/pkg/auth/nodeidentifier"
 	"k8s.io/kubernetes/pkg/features"
-	kubeletapis "k8s.io/kubernetes/pkg/kubelet/apis"
 )
 
 // PluginName is a string with the name of the plugin
@@ -71,8 +71,7 @@ type Plugin struct {
 	podsGetter     corev1lister.PodLister
 	nodesGetter    corev1lister.NodeLister
 
-	csiNodeInfoEnabled             bool
-	expandPersistentVolumesEnabled bool
+	expansionRecoveryEnabled bool
 }
 
 var (
@@ -83,8 +82,7 @@ var (
 
 // InspectFeatureGates allows setting bools without taking a dep on a global variable
 func (p *Plugin) InspectFeatureGates(featureGates featuregate.FeatureGate) {
-	p.csiNodeInfoEnabled = featureGates.Enabled(features.CSINodeInfo)
-	p.expandPersistentVolumesEnabled = featureGates.Enabled(features.ExpandPersistentVolumes)
+	p.expansionRecoveryEnabled = featureGates.Enabled(features.RecoverVolumeExpansionFailure)
 }
 
 // SetExternalKubeInformerFactory registers an informer factory into Plugin
@@ -163,10 +161,7 @@ func (p *Plugin) Admit(ctx context.Context, a admission.Attributes, o admission.
 		return p.admitLease(nodeName, a)
 
 	case csiNodeResource:
-		if p.csiNodeInfoEnabled {
-			return p.admitCSINode(nodeName, a)
-		}
-		return admission.NewForbidden(a, fmt.Errorf("disabled by feature gates %s", features.CSINodeInfo))
+		return p.admitCSINode(nodeName, a)
 
 	default:
 		return nil
@@ -339,10 +334,6 @@ func (p *Plugin) admitPodEviction(nodeName string, a admission.Attributes) error
 func (p *Plugin) admitPVCStatus(nodeName string, a admission.Attributes) error {
 	switch a.GetOperation() {
 	case admission.Update:
-		if !p.expandPersistentVolumesEnabled {
-			return admission.NewForbidden(a, fmt.Errorf("node %q is not allowed to update persistentvolumeclaim metadata", nodeName))
-		}
-
 		oldPVC, ok := a.GetOldObject().(*api.PersistentVolumeClaim)
 		if !ok {
 			return admission.NewForbidden(a, fmt.Errorf("unexpected type %T", a.GetOldObject()))
@@ -367,6 +358,14 @@ func (p *Plugin) admitPVCStatus(nodeName string, a admission.Attributes) error {
 
 		oldPVC.Status.Conditions = nil
 		newPVC.Status.Conditions = nil
+
+		if p.expansionRecoveryEnabled {
+			oldPVC.Status.ResizeStatus = nil
+			newPVC.Status.ResizeStatus = nil
+
+			oldPVC.Status.AllocatedResources = nil
+			newPVC.Status.AllocatedResources = nil
+		}
 
 		// TODO(apelisse): We don't have a good mechanism to
 		// verify that only the things that should have changed
@@ -535,7 +534,7 @@ func (p *Plugin) admitServiceAccount(nodeName string, a admission.Attributes) er
 		return admission.NewForbidden(a, err)
 	}
 	if ref.UID != pod.UID {
-		return admission.NewForbidden(a, fmt.Errorf("the UID in the bound object reference (%s) does not match the UID in record (%s). The object might have been deleted and then recreated", ref.UID, pod.UID))
+		return admission.NewForbidden(a, fmt.Errorf("the UID in the bound object reference (%s) does not match the UID in record. The object might have been deleted and then recreated", ref.UID))
 	}
 	if pod.Spec.NodeName != nodeName {
 		return admission.NewForbidden(a, fmt.Errorf("node requested token bound to a pod scheduled on a different node"))

@@ -29,8 +29,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/clock"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/utils/clock"
 )
 
 // GetObjectTTLFunc defines a function to get value of TTL.
@@ -42,6 +43,7 @@ type GetObjectFunc func(string, string, metav1.GetOptions) (runtime.Object, erro
 type objectKey struct {
 	namespace string
 	name      string
+	uid       types.UID
 }
 
 // objectStoreItems is a single item stored in objectStore.
@@ -226,7 +228,7 @@ func (c *cacheBasedManager) RegisterPod(pod *v1.Pod) {
 		c.objectStore.AddReference(pod.Namespace, name)
 	}
 	var prev *v1.Pod
-	key := objectKey{namespace: pod.Namespace, name: pod.Name}
+	key := objectKey{namespace: pod.Namespace, name: pod.Name, uid: pod.UID}
 	prev = c.registeredPods[key]
 	c.registeredPods[key] = pod
 	if prev != nil {
@@ -243,7 +245,7 @@ func (c *cacheBasedManager) RegisterPod(pod *v1.Pod) {
 
 func (c *cacheBasedManager) UnregisterPod(pod *v1.Pod) {
 	var prev *v1.Pod
-	key := objectKey{namespace: pod.Namespace, name: pod.Name}
+	key := objectKey{namespace: pod.Namespace, name: pod.Name, uid: pod.UID}
 	c.lock.Lock()
 	defer c.lock.Unlock()
 	prev = c.registeredPods[key]
@@ -258,11 +260,11 @@ func (c *cacheBasedManager) UnregisterPod(pod *v1.Pod) {
 // NewCacheBasedManager creates a manager that keeps a cache of all objects
 // necessary for registered pods.
 // It implements the following logic:
-// - whenever a pod is created or updated, the cached versions of all objects
-//   is referencing are invalidated
-// - every GetObject() call tries to fetch the value from local cache; if it is
-//   not there, invalidated or too old, we fetch it from apiserver and refresh the
-//   value in cache; otherwise it is just fetched from cache
+//   - whenever a pod is created or updated, the cached versions of all objects
+//     is referencing are invalidated
+//   - every GetObject() call tries to fetch the value from local cache; if it is
+//     not there, invalidated or too old, we fetch it from apiserver and refresh the
+//     value in cache; otherwise it is just fetched from cache
 func NewCacheBasedManager(objectStore Store, getReferencedObjects func(*v1.Pod) sets.String) Manager {
 	return &cacheBasedManager{
 		objectStore:          objectStore,

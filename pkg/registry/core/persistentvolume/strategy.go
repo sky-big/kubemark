@@ -28,10 +28,10 @@ import (
 	"k8s.io/apiserver/pkg/storage"
 	"k8s.io/apiserver/pkg/storage/names"
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
-	pvutil "k8s.io/kubernetes/pkg/api/persistentvolume"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/apis/core/validation"
 	volumevalidation "k8s.io/kubernetes/pkg/volume/validation"
+	"sigs.k8s.io/structured-merge-diff/v4/fieldpath"
 )
 
 // persistentvolumeStrategy implements behavior for PersistentVolume objects
@@ -48,18 +48,32 @@ func (persistentvolumeStrategy) NamespaceScoped() bool {
 	return false
 }
 
+// GetResetFields returns the set of fields that get reset by the strategy
+// and should not be modified by the user.
+func (persistentvolumeStrategy) GetResetFields() map[fieldpath.APIVersion]*fieldpath.Set {
+	fields := map[fieldpath.APIVersion]*fieldpath.Set{
+		"v1": fieldpath.NewSet(
+			fieldpath.MakePathOrDie("status"),
+		),
+	}
+
+	return fields
+}
+
 // ResetBeforeCreate clears the Status field which is not allowed to be set by end users on creation.
 func (persistentvolumeStrategy) PrepareForCreate(ctx context.Context, obj runtime.Object) {
-	pv := obj.(*api.PersistentVolume)
-	pv.Status = api.PersistentVolumeStatus{}
-
-	pvutil.DropDisabledFields(&pv.Spec, nil)
 }
 
 func (persistentvolumeStrategy) Validate(ctx context.Context, obj runtime.Object) field.ErrorList {
 	persistentvolume := obj.(*api.PersistentVolume)
-	errorList := validation.ValidatePersistentVolume(persistentvolume)
+	opts := validation.ValidationOptionsForPersistentVolume(persistentvolume, nil)
+	errorList := validation.ValidatePersistentVolume(persistentvolume, opts)
 	return append(errorList, volumevalidation.ValidatePersistentVolume(persistentvolume)...)
+}
+
+// WarningsOnCreate returns warnings for the creation of the given object.
+func (persistentvolumeStrategy) WarningsOnCreate(ctx context.Context, obj runtime.Object) []string {
+	return nil
 }
 
 // Canonicalize normalizes the object after validation.
@@ -75,15 +89,20 @@ func (persistentvolumeStrategy) PrepareForUpdate(ctx context.Context, obj, old r
 	newPv := obj.(*api.PersistentVolume)
 	oldPv := old.(*api.PersistentVolume)
 	newPv.Status = oldPv.Status
-
-	pvutil.DropDisabledFields(&newPv.Spec, &oldPv.Spec)
 }
 
 func (persistentvolumeStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
 	newPv := obj.(*api.PersistentVolume)
-	errorList := validation.ValidatePersistentVolume(newPv)
+	oldPv := old.(*api.PersistentVolume)
+	opts := validation.ValidationOptionsForPersistentVolume(newPv, oldPv)
+	errorList := validation.ValidatePersistentVolume(newPv, opts)
 	errorList = append(errorList, volumevalidation.ValidatePersistentVolume(newPv)...)
-	return append(errorList, validation.ValidatePersistentVolumeUpdate(newPv, old.(*api.PersistentVolume))...)
+	return append(errorList, validation.ValidatePersistentVolumeUpdate(newPv, oldPv, opts)...)
+}
+
+// WarningsOnUpdate returns warnings for the given update.
+func (persistentvolumeStrategy) WarningsOnUpdate(ctx context.Context, obj, old runtime.Object) []string {
+	return nil
 }
 
 func (persistentvolumeStrategy) AllowUnconditionalUpdate() bool {
@@ -96,6 +115,18 @@ type persistentvolumeStatusStrategy struct {
 
 var StatusStrategy = persistentvolumeStatusStrategy{Strategy}
 
+// GetResetFields returns the set of fields that get reset by the strategy
+// and should not be modified by the user.
+func (persistentvolumeStatusStrategy) GetResetFields() map[fieldpath.APIVersion]*fieldpath.Set {
+	fields := map[fieldpath.APIVersion]*fieldpath.Set{
+		"v1": fieldpath.NewSet(
+			fieldpath.MakePathOrDie("spec"),
+		),
+	}
+
+	return fields
+}
+
 // PrepareForUpdate sets the Spec field which is not allowed to be changed when updating a PV's Status
 func (persistentvolumeStatusStrategy) PrepareForUpdate(ctx context.Context, obj, old runtime.Object) {
 	newPv := obj.(*api.PersistentVolume)
@@ -105,6 +136,11 @@ func (persistentvolumeStatusStrategy) PrepareForUpdate(ctx context.Context, obj,
 
 func (persistentvolumeStatusStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
 	return validation.ValidatePersistentVolumeStatusUpdate(obj.(*api.PersistentVolume), old.(*api.PersistentVolume))
+}
+
+// WarningsOnUpdate returns warnings for the given update.
+func (persistentvolumeStatusStrategy) WarningsOnUpdate(ctx context.Context, obj, old runtime.Object) []string {
+	return nil
 }
 
 // GetAttrs returns labels and fields of a given object for filtering purposes.

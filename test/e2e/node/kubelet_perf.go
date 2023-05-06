@@ -33,6 +33,7 @@ import (
 	"k8s.io/kubernetes/test/e2e/perftype"
 	testutils "k8s.io/kubernetes/test/utils"
 	imageutils "k8s.io/kubernetes/test/utils/image"
+	admissionapi "k8s.io/pod-security-admission/api"
 
 	"github.com/onsi/ginkgo"
 )
@@ -92,7 +93,7 @@ func runResourceTrackingTest(f *framework.Framework, podsPerNode int, nodeNames 
 	// entries if we plan to monitor longer (e.g., 8 hours).
 	deadline := time.Now().Add(monitoringTime)
 	for time.Now().Before(deadline) {
-		timeLeft := deadline.Sub(time.Now())
+		timeLeft := time.Until(deadline)
 		framework.Logf("Still running...%v left", timeLeft)
 		if timeLeft < reportingPeriod {
 			time.Sleep(timeLeft)
@@ -196,6 +197,7 @@ func verifyCPULimits(expected e2ekubelet.ContainersCPUSummary, actual e2ekubelet
 var _ = SIGDescribe("Kubelet [Serial] [Slow]", func() {
 	var nodeNames sets.String
 	f := framework.NewDefaultFramework("kubelet-perf")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	var om *e2ekubelet.RuntimeOperationMonitor
 	var rm *e2ekubelet.ResourceMonitor
 
@@ -216,7 +218,7 @@ var _ = SIGDescribe("Kubelet [Serial] [Slow]", func() {
 		result := om.GetLatestRuntimeOperationErrorRate()
 		framework.Logf("runtime operation error metrics:\n%s", e2ekubelet.FormatRuntimeOperationErrorRate(result))
 	})
-	SIGDescribe("regular resource usage tracking [Feature:RegularResourceUsageTracking]", func() {
+	ginkgo.Describe("regular resource usage tracking [Feature:RegularResourceUsageTracking]", func() {
 		// We assume that the scheduler will make reasonable scheduling choices
 		// and assign ~N pods on the node.
 		// Although we want to track N pods per node, there are N + add-on pods
@@ -268,7 +270,7 @@ var _ = SIGDescribe("Kubelet [Serial] [Slow]", func() {
 			})
 		}
 	})
-	SIGDescribe("experimental resource usage tracking [Feature:ExperimentalResourceUsageTracking]", func() {
+	ginkgo.Describe("experimental resource usage tracking [Feature:ExperimentalResourceUsageTracking]", func() {
 		density := []int{100}
 		for i := range density {
 			podsPerNode := density[i]

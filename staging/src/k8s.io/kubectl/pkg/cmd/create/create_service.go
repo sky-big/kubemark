@@ -45,8 +45,8 @@ func NewCmdCreateService(f cmdutil.Factory, ioStreams genericclioptions.IOStream
 	cmd := &cobra.Command{
 		Use:     "service",
 		Aliases: []string{"svc"},
-		Short:   i18n.T("Create a service using specified subcommand."),
-		Long:    i18n.T("Create a service using specified subcommand."),
+		Short:   i18n.T("Create a service using a specified subcommand"),
+		Long:    i18n.T("Create a service using a specified subcommand."),
 		Run:     cmdutil.DefaultSubCommandRun(ioStreams.ErrOut),
 	}
 	cmd.AddCommand(NewCmdCreateServiceClusterIP(f, ioStreams))
@@ -74,9 +74,10 @@ type ServiceOptions struct {
 	Namespace        string
 	EnforceNamespace bool
 
-	Client         corev1client.CoreV1Interface
-	DryRunStrategy cmdutil.DryRunStrategy
-	DryRunVerifier *resource.DryRunVerifier
+	Client              corev1client.CoreV1Interface
+	DryRunStrategy      cmdutil.DryRunStrategy
+	DryRunVerifier      *resource.QueryParamVerifier
+	ValidationDirective string
 	genericclioptions.IOStreams
 }
 
@@ -119,11 +120,7 @@ func (o *ServiceOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []
 	if err != nil {
 		return err
 	}
-	discoveryClient, err := f.ToDiscoveryClient()
-	if err != nil {
-		return err
-	}
-	o.DryRunVerifier = resource.NewDryRunVerifier(dynamicClient, discoveryClient)
+	o.DryRunVerifier = resource.NewQueryParamVerifier(dynamicClient, f.OpenAPIGetter(), resource.QueryParamDryRun)
 	cmdutil.PrintFlagsWithDryRunStrategy(o.PrintFlags, o.DryRunStrategy)
 
 	printer, err := o.PrintFlags.ToPrinter()
@@ -133,6 +130,11 @@ func (o *ServiceOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []
 
 	o.PrintObj = func(obj runtime.Object) error {
 		return printer.PrintObj(obj, o.Out)
+	}
+
+	o.ValidationDirective, err = cmdutil.GetValidationDirective(cmd)
+	if err != nil {
+		return err
 	}
 
 	return nil
@@ -218,6 +220,7 @@ func (o *ServiceOptions) Run() error {
 		if o.FieldManager != "" {
 			createOptions.FieldManager = o.FieldManager
 		}
+		createOptions.FieldValidation = o.ValidationDirective
 		if o.DryRunStrategy == cmdutil.DryRunServer {
 			createOptions.DryRun = []string{metav1.DryRunAll}
 		}
@@ -249,7 +252,7 @@ func NewCmdCreateServiceClusterIP(f cmdutil.Factory, ioStreams genericclioptions
 	cmd := &cobra.Command{
 		Use:                   "clusterip NAME [--tcp=<port>:<targetPort>] [--dry-run=server|client|none]",
 		DisableFlagsInUseLine: true,
-		Short:                 i18n.T("Create a ClusterIP service."),
+		Short:                 i18n.T("Create a ClusterIP service"),
 		Long:                  serviceClusterIPLong,
 		Example:               serviceClusterIPExample,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -287,7 +290,7 @@ func NewCmdCreateServiceNodePort(f cmdutil.Factory, ioStreams genericclioptions.
 	cmd := &cobra.Command{
 		Use:                   "nodeport NAME [--tcp=port:targetPort] [--dry-run=server|client|none]",
 		DisableFlagsInUseLine: true,
-		Short:                 i18n.T("Create a NodePort service."),
+		Short:                 i18n.T("Create a NodePort service"),
 		Long:                  serviceNodePortLong,
 		Example:               serviceNodePortExample,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -324,7 +327,7 @@ func NewCmdCreateServiceLoadBalancer(f cmdutil.Factory, ioStreams genericcliopti
 	cmd := &cobra.Command{
 		Use:                   "loadbalancer NAME [--tcp=port:targetPort] [--dry-run=server|client|none]",
 		DisableFlagsInUseLine: true,
-		Short:                 i18n.T("Create a LoadBalancer service."),
+		Short:                 i18n.T("Create a LoadBalancer service"),
 		Long:                  serviceLoadBalancerLong,
 		Example:               serviceLoadBalancerExample,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -364,7 +367,7 @@ func NewCmdCreateServiceExternalName(f cmdutil.Factory, ioStreams genericcliopti
 	cmd := &cobra.Command{
 		Use:                   "externalname NAME --external-name external.name [--dry-run=server|client|none]",
 		DisableFlagsInUseLine: true,
-		Short:                 i18n.T("Create an ExternalName service."),
+		Short:                 i18n.T("Create an ExternalName service"),
 		Long:                  serviceExternalNameLong,
 		Example:               serviceExternalNameExample,
 		Run: func(cmd *cobra.Command, args []string) {

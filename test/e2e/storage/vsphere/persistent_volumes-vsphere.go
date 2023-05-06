@@ -30,6 +30,7 @@ import (
 	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	"k8s.io/kubernetes/test/e2e/storage/utils"
+	admissionapi "k8s.io/pod-security-admission/api"
 )
 
 // Testing configurations of single a PV/PVC pair attached to a vSphere Disk
@@ -51,6 +52,7 @@ var _ = utils.SIGDescribe("PersistentVolumes:vsphere [Feature:vsphere]", func() 
 	)
 
 	f := framework.NewDefaultFramework("pv")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	/*
 		Test Setup
 
@@ -94,9 +96,9 @@ var _ = utils.SIGDescribe("PersistentVolumes:vsphere [Feature:vsphere]", func() 
 			}
 		}
 		ginkgo.By("Creating the PV and PVC")
-		pv, pvc, err = e2epv.CreatePVPVC(c, pvConfig, pvcConfig, ns, false)
+		pv, pvc, err = e2epv.CreatePVPVC(c, f.Timeouts, pvConfig, pvcConfig, ns, false)
 		framework.ExpectNoError(err)
-		framework.ExpectNoError(e2epv.WaitOnPVandPVC(c, ns, pv, pvc))
+		framework.ExpectNoError(e2epv.WaitOnPVandPVC(c, f.Timeouts, ns, pv, pvc))
 
 		ginkgo.By("Creating the Client Pod")
 		clientPod, err = e2epod.CreateClientPod(c, ns, pvc)

@@ -37,19 +37,20 @@ import (
 const secondNodePortSvcName = "second-node-port-service"
 
 // GetHTTPContent returns the content of the given url by HTTP.
-func GetHTTPContent(host string, port int, timeout time.Duration, url string) bytes.Buffer {
+func GetHTTPContent(host string, port int, timeout time.Duration, url string) (string, error) {
 	var body bytes.Buffer
-	if pollErr := wait.PollImmediate(framework.Poll, timeout, func() (bool, error) {
+	pollErr := wait.PollImmediate(framework.Poll, timeout, func() (bool, error) {
 		result := e2enetwork.PokeHTTP(host, port, url, nil)
 		if result.Status == e2enetwork.HTTPSuccess {
 			body.Write(result.Body)
 			return true, nil
 		}
 		return false, nil
-	}); pollErr != nil {
-		framework.Failf("Could not reach HTTP service through %v:%v%v after %v: %v", host, port, url, timeout, pollErr)
+	})
+	if pollErr != nil {
+		framework.Logf("Could not reach HTTP service through %v:%v%v after %v: %v", host, port, url, timeout, pollErr)
 	}
-	return body
+	return body.String(), pollErr
 }
 
 // GetHTTPContentFromTestContainer returns the content of the given url by HTTP via a test container.
@@ -138,6 +139,41 @@ func execSourceIPTest(sourcePod v1.Pod, targetAddr string) (string, string) {
 		framework.Failf("exec pod returned unexpected stdout: [%v]\n", stdout)
 	}
 	return sourcePod.Status.PodIP, host
+}
+
+// execHostnameTest executes curl to access "/hostname" endpoint on target address
+// from given Pod to check the hostname of the target destination.
+// It also converts FQDNs to hostnames, so if an FQDN is passed as
+// targetHostname only the hostname part will be considered for comparison.
+func execHostnameTest(sourcePod v1.Pod, targetAddr, targetHostname string) {
+	var (
+		err     error
+		stdout  string
+		timeout = 2 * time.Minute
+	)
+
+	framework.Logf("Waiting up to %v to get response from %s", timeout, targetAddr)
+	cmd := fmt.Sprintf(`curl -q -s --connect-timeout 30 %s/hostname`, targetAddr)
+	for start := time.Now(); time.Since(start) < timeout; time.Sleep(2 * time.Second) {
+		stdout, err = framework.RunHostCmd(sourcePod.Namespace, sourcePod.Name, cmd)
+		if err != nil {
+			framework.Logf("got err: %v, retry until timeout", err)
+			continue
+		}
+		// Need to check output because it might omit in case of error.
+		if strings.TrimSpace(stdout) == "" {
+			framework.Logf("got empty stdout, retry until timeout")
+			continue
+		}
+		break
+	}
+
+	// Ensure we're comparing hostnames and not FQDNs
+	targetHostname = strings.Split(targetHostname, ".")[0]
+	hostname := strings.TrimSpace(strings.Split(stdout, ".")[0])
+
+	framework.ExpectNoError(err)
+	framework.ExpectEqual(hostname, targetHostname)
 }
 
 // createSecondNodePortService creates a service with the same selector as config.NodePortService and same HTTP Port

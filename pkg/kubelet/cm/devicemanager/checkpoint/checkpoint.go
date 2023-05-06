@@ -77,7 +77,6 @@ func New(devEntries []PodDevicesEntry, devices map[string][]string) DeviceManage
 	return NewV2(devEntries, devices)
 }
 
-// NewV2 returns an instance of Checkpoint (k8s >= 1.20)
 func NewV2(devEntries []PodDevicesEntry, devices map[string][]string) DeviceManagerCheckpoint {
 	return &Data{
 		Data: checkpointData{

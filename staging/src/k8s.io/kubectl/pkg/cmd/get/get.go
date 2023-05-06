@@ -47,6 +47,7 @@ import (
 	"k8s.io/kubectl/pkg/scheme"
 	"k8s.io/kubectl/pkg/util/i18n"
 	"k8s.io/kubectl/pkg/util/interrupt"
+	"k8s.io/kubectl/pkg/util/slice"
 	"k8s.io/kubectl/pkg/util/templates"
 	utilpointer "k8s.io/utils/pointer"
 )
@@ -74,6 +75,7 @@ type GetOptions struct {
 	AllNamespaces     bool
 	Namespace         string
 	ExplicitNamespace bool
+	Subresource       string
 
 	ServerPrint bool
 
@@ -86,57 +88,60 @@ type GetOptions struct {
 
 var (
 	getLong = templates.LongDesc(i18n.T(`
-		Display one or many resources
+		Display one or many resources.
 
 		Prints a table of the most important information about the specified resources.
 		You can filter the list using a label selector and the --selector flag. If the
 		desired resource type is namespaced you will only see results in your current
 		namespace unless you pass --all-namespaces.
 
-		Uninitialized objects are not shown unless --include-uninitialized is passed.
-
 		By specifying the output as 'template' and providing a Go template as the value
 		of the --template flag, you can filter the attributes of the fetched resources.`))
 
 	getExample = templates.Examples(i18n.T(`
-		# List all pods in ps output format.
+		# List all pods in ps output format
 		kubectl get pods
 
-		# List all pods in ps output format with more information (such as node name).
+		# List all pods in ps output format with more information (such as node name)
 		kubectl get pods -o wide
 
-		# List a single replication controller with specified NAME in ps output format.
+		# List a single replication controller with specified NAME in ps output format
 		kubectl get replicationcontroller web
 
-		# List deployments in JSON output format, in the "v1" version of the "apps" API group:
+		# List deployments in JSON output format, in the "v1" version of the "apps" API group
 		kubectl get deployments.v1.apps -o json
 
-		# List a single pod in JSON output format.
+		# List a single pod in JSON output format
 		kubectl get -o json pod web-pod-13je7
 
-		# List a pod identified by type and name specified in "pod.yaml" in JSON output format.
+		# List a pod identified by type and name specified in "pod.yaml" in JSON output format
 		kubectl get -f pod.yaml -o json
 
-		# List resources from a directory with kustomization.yaml - e.g. dir/kustomization.yaml.
+		# List resources from a directory with kustomization.yaml - e.g. dir/kustomization.yaml
 		kubectl get -k dir/
 
-		# Return only the phase value of the specified pod.
+		# Return only the phase value of the specified pod
 		kubectl get -o template pod/web-pod-13je7 --template={{.status.phase}}
 
-		# List resource information in custom columns.
+		# List resource information in custom columns
 		kubectl get pod test-pod -o custom-columns=CONTAINER:.spec.containers[0].name,IMAGE:.spec.containers[0].image
 
-		# List all replication controllers and services together in ps output format.
+		# List all replication controllers and services together in ps output format
 		kubectl get rc,services
 
-		# List one or more resources by their type and names.
-		kubectl get rc/web service/frontend pods/web-pod-13je7`))
+		# List one or more resources by their type and names
+		kubectl get rc/web service/frontend pods/web-pod-13je7
+
+		# List status subresource for a single pod.
+		kubectl get pod web-pod-13je7 --subresource status`))
 )
 
 const (
 	useOpenAPIPrintColumnFlagLabel = "use-openapi-print-columns"
 	useServerPrintColumns          = "server-print"
 )
+
+var supportedSubresources = []string{"status", "scale"}
 
 // NewGetOptions returns a GetOptions with default chunk size 500.
 func NewGetOptions(parent string, streams genericclioptions.IOStreams) *GetOptions {
@@ -145,7 +150,7 @@ func NewGetOptions(parent string, streams genericclioptions.IOStreams) *GetOptio
 		CmdParent:  parent,
 
 		IOStreams:   streams,
-		ChunkSize:   500,
+		ChunkSize:   cmdutil.DefaultChunkSize,
 		ServerPrint: true,
 	}
 }
@@ -156,11 +161,12 @@ func NewCmdGet(parent string, f cmdutil.Factory, streams genericclioptions.IOStr
 	o := NewGetOptions(parent, streams)
 
 	cmd := &cobra.Command{
-		Use:                   "get [(-o|--output=)json|yaml|wide|custom-columns=...|custom-columns-file=...|go-template=...|go-template-file=...|jsonpath=...|jsonpath-file=...] (TYPE[.VERSION][.GROUP] [NAME | -l label] | TYPE[.VERSION][.GROUP]/NAME ...) [flags]",
+		Use:                   fmt.Sprintf("get [(-o|--output=)%s] (TYPE[.VERSION][.GROUP] [NAME | -l label] | TYPE[.VERSION][.GROUP]/NAME ...) [flags]", strings.Join(o.PrintFlags.AllowedFormats(), "|")),
 		DisableFlagsInUseLine: true,
 		Short:                 i18n.T("Display one or many resources"),
 		Long:                  getLong + "\n\n" + cmdutil.SuggestAPIResources(parent),
 		Example:               getExample,
+		// ValidArgsFunction is set when this function is called so that we have access to the util package
 		Run: func(cmd *cobra.Command, args []string) {
 			cmdutil.CheckErr(o.Complete(f, cmd, args))
 			cmdutil.CheckErr(o.Validate(cmd))
@@ -172,17 +178,18 @@ func NewCmdGet(parent string, f cmdutil.Factory, streams genericclioptions.IOStr
 	o.PrintFlags.AddFlags(cmd)
 
 	cmd.Flags().StringVar(&o.Raw, "raw", o.Raw, "Raw URI to request from the server.  Uses the transport specified by the kubeconfig file.")
-	cmd.Flags().BoolVarP(&o.Watch, "watch", "w", o.Watch, "After listing/getting the requested object, watch for changes. Uninitialized objects are excluded if no object name is provided.")
+	cmd.Flags().BoolVarP(&o.Watch, "watch", "w", o.Watch, "After listing/getting the requested object, watch for changes.")
 	cmd.Flags().BoolVar(&o.WatchOnly, "watch-only", o.WatchOnly, "Watch for changes to the requested object(s), without listing/getting first.")
 	cmd.Flags().BoolVar(&o.OutputWatchEvents, "output-watch-events", o.OutputWatchEvents, "Output watch event objects when --watch or --watch-only is used. Existing objects are output as initial ADDED events.")
-	cmd.Flags().Int64Var(&o.ChunkSize, "chunk-size", o.ChunkSize, "Return large lists in chunks rather than all at once. Pass 0 to disable. This flag is beta and may change in the future.")
 	cmd.Flags().BoolVar(&o.IgnoreNotFound, "ignore-not-found", o.IgnoreNotFound, "If the requested object does not exist the command will return exit code 0.")
-	cmd.Flags().StringVarP(&o.LabelSelector, "selector", "l", o.LabelSelector, "Selector (label query) to filter on, supports '=', '==', and '!='.(e.g. -l key1=value1,key2=value2)")
 	cmd.Flags().StringVar(&o.FieldSelector, "field-selector", o.FieldSelector, "Selector (field query) to filter on, supports '=', '==', and '!='.(e.g. --field-selector key1=value1,key2=value2). The server only supports a limited number of field queries per type.")
 	cmd.Flags().BoolVarP(&o.AllNamespaces, "all-namespaces", "A", o.AllNamespaces, "If present, list the requested object(s) across all namespaces. Namespace in current context is ignored even if specified with --namespace.")
 	addOpenAPIPrintColumnFlags(cmd, o)
 	addServerPrintColumnFlags(cmd, o)
 	cmdutil.AddFilenameOptionFlags(cmd, &o.FilenameOptions, "identifying the resource to get from a server.")
+	cmdutil.AddChunkSizeFlag(cmd, &o.ChunkSize)
+	cmdutil.AddLabelSelectorFlagVar(cmd, &o.LabelSelector)
+	cmdutil.AddSubresourceFlags(cmd, &o.Subresource, "If specified, gets the subresource of the requested object.", supportedSubresources...)
 	return cmd
 }
 
@@ -316,6 +323,9 @@ func (o *GetOptions) Validate(cmd *cobra.Command) error {
 	}
 	if o.OutputWatchEvents && !(o.Watch || o.WatchOnly) {
 		return cmdutil.UsageErrorf(cmd, "--output-watch-events option can only be used with --watch or --watch-only")
+	}
+	if len(o.Subresource) > 0 && !slice.ContainsString(supportedSubresources, o.Subresource, nil) {
+		return fmt.Errorf("invalid subresource value: %q. Must be one of %v", o.Subresource, supportedSubresources)
 	}
 	return nil
 }
@@ -470,6 +480,7 @@ func (o *GetOptions) Run(f cmdutil.Factory, cmd *cobra.Command, args []string) e
 		FilenameParam(o.ExplicitNamespace, &o.FilenameOptions).
 		LabelSelectorParam(o.LabelSelector).
 		FieldSelectorParam(o.FieldSelector).
+		Subresource(o.Subresource).
 		RequestChunksOf(chunkSize).
 		ResourceTypeOrNameArgs(true, args...).
 		ContinueOnError().
@@ -799,7 +810,6 @@ func (o *GetOptions) printGeneric(r *resource.Result) error {
 		}
 		if listMeta, err := meta.ListAccessor(obj); err == nil {
 			list.Object["metadata"] = map[string]interface{}{
-				"selfLink":        listMeta.GetSelfLink(),
 				"resourceVersion": listMeta.GetResourceVersion(),
 			}
 		}

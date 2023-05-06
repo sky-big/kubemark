@@ -37,15 +37,17 @@ import (
 	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	"k8s.io/kubernetes/test/e2e/storage/utils"
+	admissionapi "k8s.io/pod-security-admission/api"
 )
 
 /*
-	Test to verify volume status after node power off:
-	1. Verify the pod got provisioned on a different node with volume attached to it
-	2. Verify the volume is detached from the powered off node
+Test to verify volume status after node power off:
+1. Verify the pod got provisioned on a different node with volume attached to it
+2. Verify the volume is detached from the powered off node
 */
 var _ = utils.SIGDescribe("Node Poweroff [Feature:vsphere] [Slow] [Disruptive]", func() {
 	f := framework.NewDefaultFramework("node-poweroff")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	var (
 		client    clientset.Interface
 		namespace string
@@ -92,7 +94,7 @@ var _ = utils.SIGDescribe("Node Poweroff [Feature:vsphere] [Slow] [Disruptive]",
 
 		ginkgo.By("Waiting for PVC to be in bound phase")
 		pvclaims := []*v1.PersistentVolumeClaim{pvclaim}
-		pvs, err := e2epv.WaitForPVClaimBoundPhase(client, pvclaims, framework.ClaimProvisionTimeout)
+		pvs, err := e2epv.WaitForPVClaimBoundPhase(client, pvclaims, f.Timeouts.ClaimProvision)
 		framework.ExpectNoError(err, fmt.Sprintf("Failed to wait until PVC phase set to bound: %v", err))
 		volumePath := pvs[0].Spec.VsphereVolume.VolumePath
 

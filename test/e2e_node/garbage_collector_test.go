@@ -25,9 +25,10 @@ import (
 	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	internalapi "k8s.io/cri-api/pkg/apis"
-	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
+	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 	"k8s.io/kubernetes/pkg/kubelet/types"
 	"k8s.io/kubernetes/test/e2e/framework"
+	admissionapi "k8s.io/pod-security-admission/api"
 
 	"github.com/onsi/ginkgo"
 	"github.com/onsi/gomega"
@@ -70,8 +71,9 @@ type testRun struct {
 
 // GarbageCollect tests that the Kubelet conforms to the Kubelet Garbage Collection Policy, found here:
 // http://kubernetes.io/docs/admin/garbage-collection/
-var _ = framework.KubeDescribe("GarbageCollect [Serial][NodeFeature:GarbageCollect]", func() {
+var _ = SIGDescribe("GarbageCollect [Serial][NodeFeature:GarbageCollect]", func() {
 	f := framework.NewDefaultFramework("garbage-collect-test")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	containerNamePrefix := "gc-test-container-"
 	podNamePrefix := "gc-test-pod-"
 
@@ -135,11 +137,12 @@ var _ = framework.KubeDescribe("GarbageCollect [Serial][NodeFeature:GarbageColle
 })
 
 // Tests the following:
-// 	pods are created, and all containers restart the specified number of times
-// 	while containers are running, the number of copies of a single container does not exceed maxPerPodContainer
-// 	while containers are running, the total number of containers does not exceed maxTotalContainers
-// 	while containers are running, if not constrained by maxPerPodContainer or maxTotalContainers, keep an extra copy of each container
-// 	once pods are killed, all containers are eventually cleaned up
+//
+//	pods are created, and all containers restart the specified number of times
+//	while containers are running, the number of copies of a single container does not exceed maxPerPodContainer
+//	while containers are running, the total number of containers does not exceed maxTotalContainers
+//	while containers are running, if not constrained by maxPerPodContainer or maxTotalContainers, keep an extra copy of each container
+//	once pods are killed, all containers are eventually cleaned up
 func containerGCTest(f *framework.Framework, test testRun) {
 	var runtime internalapi.RuntimeService
 	ginkgo.BeforeEach(func() {

@@ -1,7 +1,8 @@
+//go:build windows
 // +build windows
 
 /*
-Copyright 2018 The Kubernetes Authors.
+Copyright 2021 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,27 +21,30 @@ package winkernel
 
 import (
 	"fmt"
-	"k8s.io/api/core/v1"
-	discovery "k8s.io/api/discovery/v1beta1"
+	"net"
+	"strings"
+	"testing"
+	"time"
+
+	v1 "k8s.io/api/core/v1"
+	discovery "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/kubernetes/pkg/proxy"
 	"k8s.io/kubernetes/pkg/proxy/healthcheck"
-	utilproxy "k8s.io/kubernetes/pkg/proxy/util"
+	netutils "k8s.io/utils/net"
 	utilpointer "k8s.io/utils/pointer"
-	"net"
-	"strings"
-	"testing"
-	"time"
 )
 
-const testHostName = "test-hostname"
-const macAddress = "00-11-22-33-44-55"
-const clusterCIDR = "192.168.1.0/24"
-const destinationPrefix = "192.168.2.0/24"
-const providerAddress = "10.0.0.3"
-const guid = "123ABC"
+const (
+	testHostName      = "test-hostname"
+	macAddress        = "00-11-22-33-44-55"
+	clusterCIDR       = "192.168.1.0/24"
+	destinationPrefix = "192.168.2.0/24"
+	providerAddress   = "10.0.0.3"
+	guid              = "123ABC"
+)
 
 type fakeHNS struct{}
 
@@ -60,19 +64,36 @@ func (hns fakeHNS) getNetworkByName(name string) (*hnsNetworkInfo, error) {
 	return &hnsNetworkInfo{
 		id:            strings.ToUpper(guid),
 		name:          name,
-		networkType:   "Overlay",
+		networkType:   NETWORK_TYPE_OVERLAY,
 		remoteSubnets: remoteSubnets,
 	}, nil
+}
+
+func (hns fakeHNS) getAllEndpointsByNetwork(networkName string) (map[string]*(endpointsInfo), error) {
+	return nil, nil
 }
 
 func (hns fakeHNS) getEndpointByID(id string) (*endpointsInfo, error) {
 	return nil, nil
 }
 
-func (hns fakeHNS) getEndpointByIpAddress(ip string, networkName string) (*endpointsInfo, error) {
-	_, ipNet, _ := net.ParseCIDR(destinationPrefix)
+func (hns fakeHNS) getEndpointByName(name string) (*endpointsInfo, error) {
+	return &endpointsInfo{
+		isLocal:    true,
+		macAddress: macAddress,
+		hnsID:      guid,
+		hns:        hns,
+	}, nil
+}
 
-	if ipNet.Contains(net.ParseIP(ip)) {
+func (hns fakeHNS) getAllLoadBalancers() (map[loadBalancerIdentifier]*loadBalancerInfo, error) {
+	return nil, nil
+}
+
+func (hns fakeHNS) getEndpointByIpAddress(ip string, networkName string) (*endpointsInfo, error) {
+	_, ipNet, _ := netutils.ParseCIDRSloppy(destinationPrefix)
+
+	if ipNet.Contains(netutils.ParseIPSloppy(ip)) {
 		return &endpointsInfo{
 			ip:         ip,
 			isLocal:    false,
@@ -99,7 +120,7 @@ func (hns fakeHNS) deleteEndpoint(hnsID string) error {
 	return nil
 }
 
-func (hns fakeHNS) getLoadBalancer(endpoints []endpointsInfo, flags loadBalancerFlags, sourceVip string, vip string, protocol uint16, internalPort uint16, externalPort uint16) (*loadBalancerInfo, error) {
+func (hns fakeHNS) getLoadBalancer(endpoints []endpointsInfo, flags loadBalancerFlags, sourceVip string, vip string, protocol uint16, internalPort uint16, externalPort uint16, previousLoadBalancers map[loadBalancerIdentifier]*loadBalancerInfo) (*loadBalancerInfo, error) {
 	return &loadBalancerInfo{
 		hnsID: guid,
 	}, nil
@@ -109,7 +130,7 @@ func (hns fakeHNS) deleteLoadBalancer(hnsID string) error {
 	return nil
 }
 
-func NewFakeProxier(syncPeriod time.Duration, minSyncPeriod time.Duration, clusterCIDR string, hostname string, nodeIP net.IP, networkType string, endpointSliceEnabled bool) *Proxier {
+func NewFakeProxier(syncPeriod time.Duration, minSyncPeriod time.Duration, clusterCIDR string, hostname string, nodeIP net.IP, networkType string) *Proxier {
 	sourceVip := "192.168.1.2"
 	hnsNetworkInfo := &hnsNetworkInfo{
 		id:          strings.ToUpper(guid),
@@ -117,7 +138,6 @@ func NewFakeProxier(syncPeriod time.Duration, minSyncPeriod time.Duration, clust
 		networkType: networkType,
 	}
 	proxier := &Proxier{
-		portsMap:            make(map[utilproxy.LocalPort]utilproxy.Closeable),
 		serviceMap:          make(proxy.ServiceMap),
 		endpointsMap:        make(proxy.EndpointsMap),
 		clusterCIDR:         clusterCIDR,
@@ -133,7 +153,7 @@ func NewFakeProxier(syncPeriod time.Duration, minSyncPeriod time.Duration, clust
 	}
 
 	serviceChanges := proxy.NewServiceChangeTracker(proxier.newServiceInfo, v1.IPv4Protocol, nil, proxier.serviceMapChange)
-	endpointChangeTracker := proxy.NewEndpointChangeTracker(hostname, proxier.newEndpointInfo, v1.IPv4Protocol, nil, endpointSliceEnabled, proxier.endpointsMapChange)
+	endpointChangeTracker := proxy.NewEndpointChangeTracker(hostname, proxier.newEndpointInfo, v1.IPv4Protocol, nil, proxier.endpointsMapChange)
 	proxier.endpointsChanges = endpointChangeTracker
 	proxier.serviceChanges = serviceChanges
 
@@ -142,7 +162,7 @@ func NewFakeProxier(syncPeriod time.Duration, minSyncPeriod time.Duration, clust
 
 func TestCreateServiceVip(t *testing.T) {
 	syncPeriod := 30 * time.Second
-	proxier := NewFakeProxier(syncPeriod, syncPeriod, clusterCIDR, "testhost", net.ParseIP("10.0.0.1"), "Overlay", false)
+	proxier := NewFakeProxier(syncPeriod, syncPeriod, clusterCIDR, "testhost", netutils.ParseIPSloppy("10.0.0.1"), NETWORK_TYPE_OVERLAY)
 	if proxier == nil {
 		t.Error()
 	}
@@ -177,7 +197,6 @@ func TestCreateServiceVip(t *testing.T) {
 			}}
 		}),
 	)
-	makeEndpointsMap(proxier)
 	proxier.setInitialized(true)
 	proxier.syncProxyRules()
 
@@ -198,7 +217,7 @@ func TestCreateServiceVip(t *testing.T) {
 
 func TestCreateRemoteEndpointOverlay(t *testing.T) {
 	syncPeriod := 30 * time.Second
-	proxier := NewFakeProxier(syncPeriod, syncPeriod, clusterCIDR, "testhost", net.ParseIP("10.0.0.1"), "Overlay", false)
+	proxier := NewFakeProxier(syncPeriod, syncPeriod, clusterCIDR, "testhost", netutils.ParseIPSloppy("10.0.0.1"), NETWORK_TYPE_OVERLAY)
 	if proxier == nil {
 		t.Error()
 	}
@@ -211,6 +230,7 @@ func TestCreateRemoteEndpointOverlay(t *testing.T) {
 		Port:           "p80",
 		Protocol:       v1.ProtocolTCP,
 	}
+	tcpProtocol := v1.ProtocolTCP
 
 	makeServiceMap(proxier,
 		makeTestService(svcPortName.Namespace, svcPortName.Name, func(svc *v1.Service) {
@@ -224,17 +244,16 @@ func TestCreateRemoteEndpointOverlay(t *testing.T) {
 			}}
 		}),
 	)
-	makeEndpointsMap(proxier,
-		makeTestEndpoints(svcPortName.Namespace, svcPortName.Name, func(ept *v1.Endpoints) {
-			ept.Subsets = []v1.EndpointSubset{{
-				Addresses: []v1.EndpointAddress{{
-					IP: epIpAddressRemote,
-				}},
-				Ports: []v1.EndpointPort{{
-					Name:     svcPortName.Port,
-					Port:     int32(svcPort),
-					Protocol: v1.ProtocolTCP,
-				}},
+	populateEndpointSlices(proxier,
+		makeTestEndpointSlice(svcPortName.Namespace, svcPortName.Name, 1, func(eps *discovery.EndpointSlice) {
+			eps.AddressType = discovery.AddressTypeIPv4
+			eps.Endpoints = []discovery.Endpoint{{
+				Addresses: []string{epIpAddressRemote},
+			}}
+			eps.Ports = []discovery.EndpointPort{{
+				Name:     utilpointer.StringPtr(svcPortName.Port),
+				Port:     utilpointer.Int32(int32(svcPort)),
+				Protocol: &tcpProtocol,
 			}}
 		}),
 	)
@@ -263,18 +282,19 @@ func TestCreateRemoteEndpointOverlay(t *testing.T) {
 
 func TestCreateRemoteEndpointL2Bridge(t *testing.T) {
 	syncPeriod := 30 * time.Second
-	proxier := NewFakeProxier(syncPeriod, syncPeriod, clusterCIDR, "testhost", net.ParseIP("10.0.0.1"), "L2Bridge", false)
+	proxier := NewFakeProxier(syncPeriod, syncPeriod, clusterCIDR, "testhost", netutils.ParseIPSloppy("10.0.0.1"), "L2Bridge")
 	if proxier == nil {
 		t.Error()
 	}
 
+	tcpProtocol := v1.ProtocolTCP
 	svcIP := "10.20.30.41"
 	svcPort := 80
 	svcNodePort := 3001
 	svcPortName := proxy.ServicePortName{
 		NamespacedName: makeNSN("ns1", "svc1"),
 		Port:           "p80",
-		Protocol:       v1.ProtocolTCP,
+		Protocol:       tcpProtocol,
 	}
 
 	makeServiceMap(proxier,
@@ -284,22 +304,21 @@ func TestCreateRemoteEndpointL2Bridge(t *testing.T) {
 			svc.Spec.Ports = []v1.ServicePort{{
 				Name:     svcPortName.Port,
 				Port:     int32(svcPort),
-				Protocol: v1.ProtocolTCP,
+				Protocol: tcpProtocol,
 				NodePort: int32(svcNodePort),
 			}}
 		}),
 	)
-	makeEndpointsMap(proxier,
-		makeTestEndpoints(svcPortName.Namespace, svcPortName.Name, func(ept *v1.Endpoints) {
-			ept.Subsets = []v1.EndpointSubset{{
-				Addresses: []v1.EndpointAddress{{
-					IP: epIpAddressRemote,
-				}},
-				Ports: []v1.EndpointPort{{
-					Name:     svcPortName.Port,
-					Port:     int32(svcPort),
-					Protocol: v1.ProtocolTCP,
-				}},
+	populateEndpointSlices(proxier,
+		makeTestEndpointSlice(svcPortName.Namespace, svcPortName.Name, 1, func(eps *discovery.EndpointSlice) {
+			eps.AddressType = discovery.AddressTypeIPv4
+			eps.Endpoints = []discovery.Endpoint{{
+				Addresses: []string{epIpAddressRemote},
+			}}
+			eps.Ports = []discovery.EndpointPort{{
+				Name:     utilpointer.String(svcPortName.Port),
+				Port:     utilpointer.Int32(int32(svcPort)),
+				Protocol: &tcpProtocol,
 			}}
 		}),
 	)
@@ -326,7 +345,8 @@ func TestCreateRemoteEndpointL2Bridge(t *testing.T) {
 }
 func TestSharedRemoteEndpointDelete(t *testing.T) {
 	syncPeriod := 30 * time.Second
-	proxier := NewFakeProxier(syncPeriod, syncPeriod, clusterCIDR, "testhost", net.ParseIP("10.0.0.1"), "L2Bridge", false)
+	tcpProtocol := v1.ProtocolTCP
+	proxier := NewFakeProxier(syncPeriod, syncPeriod, clusterCIDR, "testhost", netutils.ParseIPSloppy("10.0.0.1"), "L2Bridge")
 	if proxier == nil {
 		t.Error()
 	}
@@ -371,29 +391,27 @@ func TestSharedRemoteEndpointDelete(t *testing.T) {
 			}}
 		}),
 	)
-	makeEndpointsMap(proxier,
-		makeTestEndpoints(svcPortName1.Namespace, svcPortName1.Name, func(ept *v1.Endpoints) {
-			ept.Subsets = []v1.EndpointSubset{{
-				Addresses: []v1.EndpointAddress{{
-					IP: epIpAddressRemote,
-				}},
-				Ports: []v1.EndpointPort{{
-					Name:     svcPortName1.Port,
-					Port:     int32(svcPort1),
-					Protocol: v1.ProtocolTCP,
-				}},
+	populateEndpointSlices(proxier,
+		makeTestEndpointSlice(svcPortName1.Namespace, svcPortName1.Name, 1, func(eps *discovery.EndpointSlice) {
+			eps.AddressType = discovery.AddressTypeIPv4
+			eps.Endpoints = []discovery.Endpoint{{
+				Addresses: []string{epIpAddressRemote},
+			}}
+			eps.Ports = []discovery.EndpointPort{{
+				Name:     utilpointer.StringPtr(svcPortName1.Port),
+				Port:     utilpointer.Int32(int32(svcPort1)),
+				Protocol: &tcpProtocol,
 			}}
 		}),
-		makeTestEndpoints(svcPortName2.Namespace, svcPortName2.Name, func(ept *v1.Endpoints) {
-			ept.Subsets = []v1.EndpointSubset{{
-				Addresses: []v1.EndpointAddress{{
-					IP: epIpAddressRemote,
-				}},
-				Ports: []v1.EndpointPort{{
-					Name:     svcPortName2.Port,
-					Port:     int32(svcPort2),
-					Protocol: v1.ProtocolTCP,
-				}},
+		makeTestEndpointSlice(svcPortName2.Namespace, svcPortName2.Name, 1, func(eps *discovery.EndpointSlice) {
+			eps.AddressType = discovery.AddressTypeIPv4
+			eps.Endpoints = []discovery.Endpoint{{
+				Addresses: []string{epIpAddressRemote},
+			}}
+			eps.Ports = []discovery.EndpointPort{{
+				Name:     utilpointer.StringPtr(svcPortName2.Port),
+				Port:     utilpointer.Int32(int32(svcPort2)),
+				Protocol: &tcpProtocol,
 			}}
 		}),
 	)
@@ -432,17 +450,16 @@ func TestSharedRemoteEndpointDelete(t *testing.T) {
 		}),
 	)
 
-	deleteEndpoints(proxier,
-		makeTestEndpoints(svcPortName2.Namespace, svcPortName2.Name, func(ept *v1.Endpoints) {
-			ept.Subsets = []v1.EndpointSubset{{
-				Addresses: []v1.EndpointAddress{{
-					IP: epIpAddressRemote,
-				}},
-				Ports: []v1.EndpointPort{{
-					Name:     svcPortName2.Port,
-					Port:     int32(svcPort2),
-					Protocol: v1.ProtocolTCP,
-				}},
+	deleteEndpointSlices(proxier,
+		makeTestEndpointSlice(svcPortName2.Namespace, svcPortName2.Name, 1, func(eps *discovery.EndpointSlice) {
+			eps.AddressType = discovery.AddressTypeIPv4
+			eps.Endpoints = []discovery.Endpoint{{
+				Addresses: []string{epIpAddressRemote},
+			}}
+			eps.Ports = []discovery.EndpointPort{{
+				Name:     utilpointer.StringPtr(svcPortName2.Port),
+				Port:     utilpointer.Int32(int32(svcPort2)),
+				Protocol: &tcpProtocol,
 			}}
 		}),
 	)
@@ -471,7 +488,7 @@ func TestSharedRemoteEndpointDelete(t *testing.T) {
 }
 func TestSharedRemoteEndpointUpdate(t *testing.T) {
 	syncPeriod := 30 * time.Second
-	proxier := NewFakeProxier(syncPeriod, syncPeriod, clusterCIDR, "testhost", net.ParseIP("10.0.0.1"), "L2Bridge", false)
+	proxier := NewFakeProxier(syncPeriod, syncPeriod, clusterCIDR, "testhost", netutils.ParseIPSloppy("10.0.0.1"), "L2Bridge")
 	if proxier == nil {
 		t.Error()
 	}
@@ -517,29 +534,28 @@ func TestSharedRemoteEndpointUpdate(t *testing.T) {
 		}),
 	)
 
-	makeEndpointsMap(proxier,
-		makeTestEndpoints(svcPortName1.Namespace, svcPortName1.Name, func(ept *v1.Endpoints) {
-			ept.Subsets = []v1.EndpointSubset{{
-				Addresses: []v1.EndpointAddress{{
-					IP: epIpAddressRemote,
-				}},
-				Ports: []v1.EndpointPort{{
-					Name:     svcPortName1.Port,
-					Port:     int32(svcPort1),
-					Protocol: v1.ProtocolTCP,
-				}},
+	tcpProtocol := v1.ProtocolTCP
+	populateEndpointSlices(proxier,
+		makeTestEndpointSlice(svcPortName1.Namespace, svcPortName1.Name, 1, func(eps *discovery.EndpointSlice) {
+			eps.AddressType = discovery.AddressTypeIPv4
+			eps.Endpoints = []discovery.Endpoint{{
+				Addresses: []string{epIpAddressRemote},
+			}}
+			eps.Ports = []discovery.EndpointPort{{
+				Name:     utilpointer.StringPtr(svcPortName1.Port),
+				Port:     utilpointer.Int32(int32(svcPort1)),
+				Protocol: &tcpProtocol,
 			}}
 		}),
-		makeTestEndpoints(svcPortName2.Namespace, svcPortName2.Name, func(ept *v1.Endpoints) {
-			ept.Subsets = []v1.EndpointSubset{{
-				Addresses: []v1.EndpointAddress{{
-					IP: epIpAddressRemote,
-				}},
-				Ports: []v1.EndpointPort{{
-					Name:     svcPortName2.Port,
-					Port:     int32(svcPort2),
-					Protocol: v1.ProtocolTCP,
-				}},
+		makeTestEndpointSlice(svcPortName2.Namespace, svcPortName2.Name, 1, func(eps *discovery.EndpointSlice) {
+			eps.AddressType = discovery.AddressTypeIPv4
+			eps.Endpoints = []discovery.Endpoint{{
+				Addresses: []string{epIpAddressRemote},
+			}}
+			eps.Ports = []discovery.EndpointPort{{
+				Name:     utilpointer.StringPtr(svcPortName2.Port),
+				Port:     utilpointer.Int32(int32(svcPort2)),
+				Protocol: &tcpProtocol,
 			}}
 		}),
 	)
@@ -588,40 +604,37 @@ func TestSharedRemoteEndpointUpdate(t *testing.T) {
 			}}
 		}))
 
-	proxier.OnEndpointsUpdate(
-		makeTestEndpoints(svcPortName1.Namespace, svcPortName1.Name, func(ept *v1.Endpoints) {
-			ept.Subsets = []v1.EndpointSubset{{
-				Addresses: []v1.EndpointAddress{{
-					IP: epIpAddressRemote,
-				}},
-				Ports: []v1.EndpointPort{{
-					Name:     svcPortName1.Port,
-					Port:     int32(svcPort1),
-					Protocol: v1.ProtocolTCP,
-				}},
+	proxier.OnEndpointSliceUpdate(
+		makeTestEndpointSlice(svcPortName1.Namespace, svcPortName1.Name, 1, func(eps *discovery.EndpointSlice) {
+			eps.AddressType = discovery.AddressTypeIPv4
+			eps.Endpoints = []discovery.Endpoint{{
+				Addresses: []string{epIpAddressRemote},
+			}}
+			eps.Ports = []discovery.EndpointPort{{
+				Name:     utilpointer.StringPtr(svcPortName1.Port),
+				Port:     utilpointer.Int32(int32(svcPort1)),
+				Protocol: &tcpProtocol,
 			}}
 		}),
-		makeTestEndpoints(svcPortName1.Namespace, svcPortName1.Name, func(ept *v1.Endpoints) {
-			ept.Subsets = []v1.EndpointSubset{{
-				Addresses: []v1.EndpointAddress{{
-					IP: epIpAddressRemote,
-				}},
-				Ports: []v1.EndpointPort{
-					{
-						Name:     svcPortName1.Port,
-						Port:     int32(svcPort1),
-						Protocol: v1.ProtocolTCP,
-					},
-					{
-						Name:     "p443",
-						Port:     int32(443),
-						Protocol: v1.ProtocolTCP,
-					}},
+		makeTestEndpointSlice(svcPortName1.Namespace, svcPortName1.Name, 1, func(eps *discovery.EndpointSlice) {
+			eps.AddressType = discovery.AddressTypeIPv4
+			eps.Endpoints = []discovery.Endpoint{{
+				Addresses: []string{epIpAddressRemote},
 			}}
+			eps.Ports = []discovery.EndpointPort{{
+				Name:     utilpointer.StringPtr(svcPortName1.Port),
+				Port:     utilpointer.Int32(int32(svcPort1)),
+				Protocol: &tcpProtocol,
+			},
+				{
+					Name:     utilpointer.StringPtr("p443"),
+					Port:     utilpointer.Int32(int32(443)),
+					Protocol: &tcpProtocol,
+				}}
 		}))
 
 	proxier.mu.Lock()
-	proxier.endpointsSynced = true
+	proxier.endpointSlicesSynced = true
 	proxier.mu.Unlock()
 
 	proxier.setInitialized(true)
@@ -649,7 +662,8 @@ func TestSharedRemoteEndpointUpdate(t *testing.T) {
 }
 func TestCreateLoadBalancer(t *testing.T) {
 	syncPeriod := 30 * time.Second
-	proxier := NewFakeProxier(syncPeriod, syncPeriod, clusterCIDR, "testhost", net.ParseIP("10.0.0.1"), "Overlay", false)
+	tcpProtocol := v1.ProtocolTCP
+	proxier := NewFakeProxier(syncPeriod, syncPeriod, clusterCIDR, "testhost", netutils.ParseIPSloppy("10.0.0.1"), NETWORK_TYPE_OVERLAY)
 	if proxier == nil {
 		t.Error()
 	}
@@ -675,17 +689,16 @@ func TestCreateLoadBalancer(t *testing.T) {
 			}}
 		}),
 	)
-	makeEndpointsMap(proxier,
-		makeTestEndpoints(svcPortName.Namespace, svcPortName.Name, func(ept *v1.Endpoints) {
-			ept.Subsets = []v1.EndpointSubset{{
-				Addresses: []v1.EndpointAddress{{
-					IP: epIpAddressRemote,
-				}},
-				Ports: []v1.EndpointPort{{
-					Name:     svcPortName.Port,
-					Port:     int32(svcPort),
-					Protocol: v1.ProtocolTCP,
-				}},
+	populateEndpointSlices(proxier,
+		makeTestEndpointSlice(svcPortName.Namespace, svcPortName.Name, 1, func(eps *discovery.EndpointSlice) {
+			eps.AddressType = discovery.AddressTypeIPv4
+			eps.Endpoints = []discovery.Endpoint{{
+				Addresses: []string{epIpAddressRemote},
+			}}
+			eps.Ports = []discovery.EndpointPort{{
+				Name:     utilpointer.StringPtr(svcPortName.Port),
+				Port:     utilpointer.Int32(int32(svcPort)),
+				Protocol: &tcpProtocol,
 			}}
 		}),
 	)
@@ -703,12 +716,11 @@ func TestCreateLoadBalancer(t *testing.T) {
 			t.Errorf("%v does not match %v", svcInfo.hnsID, guid)
 		}
 	}
-
 }
 
 func TestCreateDsrLoadBalancer(t *testing.T) {
 	syncPeriod := 30 * time.Second
-	proxier := NewFakeProxier(syncPeriod, syncPeriod, clusterCIDR, "testhost", net.ParseIP("10.0.0.1"), "Overlay", false)
+	proxier := NewFakeProxier(syncPeriod, syncPeriod, clusterCIDR, "testhost", netutils.ParseIPSloppy("10.0.0.1"), NETWORK_TYPE_OVERLAY)
 	if proxier == nil {
 		t.Error()
 	}
@@ -721,6 +733,7 @@ func TestCreateDsrLoadBalancer(t *testing.T) {
 		Port:           "p80",
 		Protocol:       v1.ProtocolTCP,
 	}
+	lbIP := "11.21.31.41"
 
 	makeServiceMap(proxier,
 		makeTestService(svcPortName.Namespace, svcPortName.Name, func(svc *v1.Service) {
@@ -733,19 +746,22 @@ func TestCreateDsrLoadBalancer(t *testing.T) {
 				Protocol: v1.ProtocolTCP,
 				NodePort: int32(svcNodePort),
 			}}
+			svc.Status.LoadBalancer.Ingress = []v1.LoadBalancerIngress{{
+				IP: lbIP,
+			}}
 		}),
 	)
-	makeEndpointsMap(proxier,
-		makeTestEndpoints(svcPortName.Namespace, svcPortName.Name, func(ept *v1.Endpoints) {
-			ept.Subsets = []v1.EndpointSubset{{
-				Addresses: []v1.EndpointAddress{{
-					IP: epIpAddressRemote,
-				}},
-				Ports: []v1.EndpointPort{{
-					Name:     svcPortName.Port,
-					Port:     int32(svcPort),
-					Protocol: v1.ProtocolTCP,
-				}},
+	tcpProtocol := v1.ProtocolTCP
+	populateEndpointSlices(proxier,
+		makeTestEndpointSlice(svcPortName.Namespace, svcPortName.Name, 1, func(eps *discovery.EndpointSlice) {
+			eps.AddressType = discovery.AddressTypeIPv4
+			eps.Endpoints = []discovery.Endpoint{{
+				Addresses: []string{epIpAddressRemote},
+			}}
+			eps.Ports = []discovery.EndpointPort{{
+				Name:     utilpointer.StringPtr(svcPortName.Port),
+				Port:     utilpointer.Int32(int32(svcPort)),
+				Protocol: &tcpProtocol,
 			}}
 		}),
 	)
@@ -765,12 +781,17 @@ func TestCreateDsrLoadBalancer(t *testing.T) {
 		if svcInfo.localTrafficDSR != true {
 			t.Errorf("Failed to create DSR loadbalancer with local traffic policy")
 		}
+		if len(svcInfo.loadBalancerIngressIPs) == 0 {
+			t.Errorf("svcInfo does not have any loadBalancerIngressIPs, %+v", svcInfo)
+		} else if svcInfo.loadBalancerIngressIPs[0].healthCheckHnsID != guid {
+			t.Errorf("The Hns Loadbalancer HealthCheck Id %v does not match %v. ServicePortName %q", svcInfo.loadBalancerIngressIPs[0].healthCheckHnsID, guid, svcPortName.String())
+		}
 	}
 }
 
 func TestEndpointSlice(t *testing.T) {
 	syncPeriod := 30 * time.Second
-	proxier := NewFakeProxier(syncPeriod, syncPeriod, clusterCIDR, "testhost", net.ParseIP("10.0.0.1"), "Overlay", true)
+	proxier := NewFakeProxier(syncPeriod, syncPeriod, clusterCIDR, "testhost", netutils.ParseIPSloppy("10.0.0.1"), NETWORK_TYPE_OVERLAY)
 	if proxier == nil {
 		t.Error()
 	}
@@ -810,7 +831,7 @@ func TestEndpointSlice(t *testing.T) {
 		Endpoints: []discovery.Endpoint{{
 			Addresses:  []string{"192.168.2.3"},
 			Conditions: discovery.EndpointConditions{Ready: utilpointer.BoolPtr(true)},
-			Topology:   map[string]string{"kubernetes.io/hostname": "testhost2"},
+			NodeName:   utilpointer.StringPtr("testhost2"),
 		}},
 	}
 
@@ -907,33 +928,30 @@ func makeTestService(namespace, name string, svcFunc func(*v1.Service)) *v1.Serv
 	return svc
 }
 
-func makeEndpointsMap(proxier *Proxier, allEndpoints ...*v1.Endpoints) {
-	for i := range allEndpoints {
-		proxier.OnEndpointsAdd(allEndpoints[i])
+func deleteEndpointSlices(proxier *Proxier, allEndpointSlices ...*discovery.EndpointSlice) {
+	for i := range allEndpointSlices {
+		proxier.OnEndpointSliceDelete(allEndpointSlices[i])
 	}
 
 	proxier.mu.Lock()
 	defer proxier.mu.Unlock()
-	proxier.endpointsSynced = true
+	proxier.endpointSlicesSynced = true
 }
 
-func deleteEndpoints(proxier *Proxier, allEndpoints ...*v1.Endpoints) {
-	for i := range allEndpoints {
-		proxier.OnEndpointsDelete(allEndpoints[i])
+func populateEndpointSlices(proxier *Proxier, allEndpointSlices ...*discovery.EndpointSlice) {
+	for i := range allEndpointSlices {
+		proxier.OnEndpointSliceAdd(allEndpointSlices[i])
 	}
-
-	proxier.mu.Lock()
-	defer proxier.mu.Unlock()
-	proxier.endpointsSynced = true
 }
 
-func makeTestEndpoints(namespace, name string, eptFunc func(*v1.Endpoints)) *v1.Endpoints {
-	ept := &v1.Endpoints{
+func makeTestEndpointSlice(namespace, name string, sliceNum int, epsFunc func(*discovery.EndpointSlice)) *discovery.EndpointSlice {
+	eps := &discovery.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
+			Name:      fmt.Sprintf("%s-%d", name, sliceNum),
 			Namespace: namespace,
+			Labels:    map[string]string{discovery.LabelServiceName: name},
 		},
 	}
-	eptFunc(ept)
-	return ept
+	epsFunc(eps)
+	return eps
 }

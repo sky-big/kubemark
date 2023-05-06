@@ -24,6 +24,7 @@ package v1beta1
 import (
 	unsafe "unsafe"
 
+	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	conversion "k8s.io/apimachinery/pkg/conversion"
 	runtime "k8s.io/apimachinery/pkg/runtime"
@@ -39,6 +40,36 @@ func init() {
 // RegisterConversions adds conversion functions to the given scheme.
 // Public to allow building arbitrary schemes.
 func RegisterConversions(s *runtime.Scheme) error {
+	if err := s.AddGeneratedConversionFunc((*v1beta1.CredentialProvider)(nil), (*config.CredentialProvider)(nil), func(a, b interface{}, scope conversion.Scope) error {
+		return Convert_v1beta1_CredentialProvider_To_config_CredentialProvider(a.(*v1beta1.CredentialProvider), b.(*config.CredentialProvider), scope)
+	}); err != nil {
+		return err
+	}
+	if err := s.AddGeneratedConversionFunc((*config.CredentialProvider)(nil), (*v1beta1.CredentialProvider)(nil), func(a, b interface{}, scope conversion.Scope) error {
+		return Convert_config_CredentialProvider_To_v1beta1_CredentialProvider(a.(*config.CredentialProvider), b.(*v1beta1.CredentialProvider), scope)
+	}); err != nil {
+		return err
+	}
+	if err := s.AddGeneratedConversionFunc((*v1beta1.CredentialProviderConfig)(nil), (*config.CredentialProviderConfig)(nil), func(a, b interface{}, scope conversion.Scope) error {
+		return Convert_v1beta1_CredentialProviderConfig_To_config_CredentialProviderConfig(a.(*v1beta1.CredentialProviderConfig), b.(*config.CredentialProviderConfig), scope)
+	}); err != nil {
+		return err
+	}
+	if err := s.AddGeneratedConversionFunc((*config.CredentialProviderConfig)(nil), (*v1beta1.CredentialProviderConfig)(nil), func(a, b interface{}, scope conversion.Scope) error {
+		return Convert_config_CredentialProviderConfig_To_v1beta1_CredentialProviderConfig(a.(*config.CredentialProviderConfig), b.(*v1beta1.CredentialProviderConfig), scope)
+	}); err != nil {
+		return err
+	}
+	if err := s.AddGeneratedConversionFunc((*v1beta1.ExecEnvVar)(nil), (*config.ExecEnvVar)(nil), func(a, b interface{}, scope conversion.Scope) error {
+		return Convert_v1beta1_ExecEnvVar_To_config_ExecEnvVar(a.(*v1beta1.ExecEnvVar), b.(*config.ExecEnvVar), scope)
+	}); err != nil {
+		return err
+	}
+	if err := s.AddGeneratedConversionFunc((*config.ExecEnvVar)(nil), (*v1beta1.ExecEnvVar)(nil), func(a, b interface{}, scope conversion.Scope) error {
+		return Convert_config_ExecEnvVar_To_v1beta1_ExecEnvVar(a.(*config.ExecEnvVar), b.(*v1beta1.ExecEnvVar), scope)
+	}); err != nil {
+		return err
+	}
 	if err := s.AddGeneratedConversionFunc((*v1beta1.KubeletAnonymousAuthentication)(nil), (*config.KubeletAnonymousAuthentication)(nil), func(a, b interface{}, scope conversion.Scope) error {
 		return Convert_v1beta1_KubeletAnonymousAuthentication_To_config_KubeletAnonymousAuthentication(a.(*v1beta1.KubeletAnonymousAuthentication), b.(*config.KubeletAnonymousAuthentication), scope)
 	}); err != nil {
@@ -109,6 +140,26 @@ func RegisterConversions(s *runtime.Scheme) error {
 	}); err != nil {
 		return err
 	}
+	if err := s.AddGeneratedConversionFunc((*v1beta1.MemoryReservation)(nil), (*config.MemoryReservation)(nil), func(a, b interface{}, scope conversion.Scope) error {
+		return Convert_v1beta1_MemoryReservation_To_config_MemoryReservation(a.(*v1beta1.MemoryReservation), b.(*config.MemoryReservation), scope)
+	}); err != nil {
+		return err
+	}
+	if err := s.AddGeneratedConversionFunc((*config.MemoryReservation)(nil), (*v1beta1.MemoryReservation)(nil), func(a, b interface{}, scope conversion.Scope) error {
+		return Convert_config_MemoryReservation_To_v1beta1_MemoryReservation(a.(*config.MemoryReservation), b.(*v1beta1.MemoryReservation), scope)
+	}); err != nil {
+		return err
+	}
+	if err := s.AddGeneratedConversionFunc((*v1beta1.MemorySwapConfiguration)(nil), (*config.MemorySwapConfiguration)(nil), func(a, b interface{}, scope conversion.Scope) error {
+		return Convert_v1beta1_MemorySwapConfiguration_To_config_MemorySwapConfiguration(a.(*v1beta1.MemorySwapConfiguration), b.(*config.MemorySwapConfiguration), scope)
+	}); err != nil {
+		return err
+	}
+	if err := s.AddGeneratedConversionFunc((*config.MemorySwapConfiguration)(nil), (*v1beta1.MemorySwapConfiguration)(nil), func(a, b interface{}, scope conversion.Scope) error {
+		return Convert_config_MemorySwapConfiguration_To_v1beta1_MemorySwapConfiguration(a.(*config.MemorySwapConfiguration), b.(*v1beta1.MemorySwapConfiguration), scope)
+	}); err != nil {
+		return err
+	}
 	if err := s.AddGeneratedConversionFunc((*v1beta1.SerializedNodeConfigSource)(nil), (*config.SerializedNodeConfigSource)(nil), func(a, b interface{}, scope conversion.Scope) error {
 		return Convert_v1beta1_SerializedNodeConfigSource_To_config_SerializedNodeConfigSource(a.(*v1beta1.SerializedNodeConfigSource), b.(*config.SerializedNodeConfigSource), scope)
 	}); err != nil {
@@ -119,7 +170,89 @@ func RegisterConversions(s *runtime.Scheme) error {
 	}); err != nil {
 		return err
 	}
+	if err := s.AddGeneratedConversionFunc((*v1beta1.ShutdownGracePeriodByPodPriority)(nil), (*config.ShutdownGracePeriodByPodPriority)(nil), func(a, b interface{}, scope conversion.Scope) error {
+		return Convert_v1beta1_ShutdownGracePeriodByPodPriority_To_config_ShutdownGracePeriodByPodPriority(a.(*v1beta1.ShutdownGracePeriodByPodPriority), b.(*config.ShutdownGracePeriodByPodPriority), scope)
+	}); err != nil {
+		return err
+	}
+	if err := s.AddGeneratedConversionFunc((*config.ShutdownGracePeriodByPodPriority)(nil), (*v1beta1.ShutdownGracePeriodByPodPriority)(nil), func(a, b interface{}, scope conversion.Scope) error {
+		return Convert_config_ShutdownGracePeriodByPodPriority_To_v1beta1_ShutdownGracePeriodByPodPriority(a.(*config.ShutdownGracePeriodByPodPriority), b.(*v1beta1.ShutdownGracePeriodByPodPriority), scope)
+	}); err != nil {
+		return err
+	}
 	return nil
+}
+
+func autoConvert_v1beta1_CredentialProvider_To_config_CredentialProvider(in *v1beta1.CredentialProvider, out *config.CredentialProvider, s conversion.Scope) error {
+	out.Name = in.Name
+	out.MatchImages = *(*[]string)(unsafe.Pointer(&in.MatchImages))
+	out.DefaultCacheDuration = (*v1.Duration)(unsafe.Pointer(in.DefaultCacheDuration))
+	out.APIVersion = in.APIVersion
+	out.Args = *(*[]string)(unsafe.Pointer(&in.Args))
+	out.Env = *(*[]config.ExecEnvVar)(unsafe.Pointer(&in.Env))
+	return nil
+}
+
+// Convert_v1beta1_CredentialProvider_To_config_CredentialProvider is an autogenerated conversion function.
+func Convert_v1beta1_CredentialProvider_To_config_CredentialProvider(in *v1beta1.CredentialProvider, out *config.CredentialProvider, s conversion.Scope) error {
+	return autoConvert_v1beta1_CredentialProvider_To_config_CredentialProvider(in, out, s)
+}
+
+func autoConvert_config_CredentialProvider_To_v1beta1_CredentialProvider(in *config.CredentialProvider, out *v1beta1.CredentialProvider, s conversion.Scope) error {
+	out.Name = in.Name
+	out.MatchImages = *(*[]string)(unsafe.Pointer(&in.MatchImages))
+	out.DefaultCacheDuration = (*v1.Duration)(unsafe.Pointer(in.DefaultCacheDuration))
+	out.APIVersion = in.APIVersion
+	out.Args = *(*[]string)(unsafe.Pointer(&in.Args))
+	out.Env = *(*[]v1beta1.ExecEnvVar)(unsafe.Pointer(&in.Env))
+	return nil
+}
+
+// Convert_config_CredentialProvider_To_v1beta1_CredentialProvider is an autogenerated conversion function.
+func Convert_config_CredentialProvider_To_v1beta1_CredentialProvider(in *config.CredentialProvider, out *v1beta1.CredentialProvider, s conversion.Scope) error {
+	return autoConvert_config_CredentialProvider_To_v1beta1_CredentialProvider(in, out, s)
+}
+
+func autoConvert_v1beta1_CredentialProviderConfig_To_config_CredentialProviderConfig(in *v1beta1.CredentialProviderConfig, out *config.CredentialProviderConfig, s conversion.Scope) error {
+	out.Providers = *(*[]config.CredentialProvider)(unsafe.Pointer(&in.Providers))
+	return nil
+}
+
+// Convert_v1beta1_CredentialProviderConfig_To_config_CredentialProviderConfig is an autogenerated conversion function.
+func Convert_v1beta1_CredentialProviderConfig_To_config_CredentialProviderConfig(in *v1beta1.CredentialProviderConfig, out *config.CredentialProviderConfig, s conversion.Scope) error {
+	return autoConvert_v1beta1_CredentialProviderConfig_To_config_CredentialProviderConfig(in, out, s)
+}
+
+func autoConvert_config_CredentialProviderConfig_To_v1beta1_CredentialProviderConfig(in *config.CredentialProviderConfig, out *v1beta1.CredentialProviderConfig, s conversion.Scope) error {
+	out.Providers = *(*[]v1beta1.CredentialProvider)(unsafe.Pointer(&in.Providers))
+	return nil
+}
+
+// Convert_config_CredentialProviderConfig_To_v1beta1_CredentialProviderConfig is an autogenerated conversion function.
+func Convert_config_CredentialProviderConfig_To_v1beta1_CredentialProviderConfig(in *config.CredentialProviderConfig, out *v1beta1.CredentialProviderConfig, s conversion.Scope) error {
+	return autoConvert_config_CredentialProviderConfig_To_v1beta1_CredentialProviderConfig(in, out, s)
+}
+
+func autoConvert_v1beta1_ExecEnvVar_To_config_ExecEnvVar(in *v1beta1.ExecEnvVar, out *config.ExecEnvVar, s conversion.Scope) error {
+	out.Name = in.Name
+	out.Value = in.Value
+	return nil
+}
+
+// Convert_v1beta1_ExecEnvVar_To_config_ExecEnvVar is an autogenerated conversion function.
+func Convert_v1beta1_ExecEnvVar_To_config_ExecEnvVar(in *v1beta1.ExecEnvVar, out *config.ExecEnvVar, s conversion.Scope) error {
+	return autoConvert_v1beta1_ExecEnvVar_To_config_ExecEnvVar(in, out, s)
+}
+
+func autoConvert_config_ExecEnvVar_To_v1beta1_ExecEnvVar(in *config.ExecEnvVar, out *v1beta1.ExecEnvVar, s conversion.Scope) error {
+	out.Name = in.Name
+	out.Value = in.Value
+	return nil
+}
+
+// Convert_config_ExecEnvVar_To_v1beta1_ExecEnvVar is an autogenerated conversion function.
+func Convert_config_ExecEnvVar_To_v1beta1_ExecEnvVar(in *config.ExecEnvVar, out *v1beta1.ExecEnvVar, s conversion.Scope) error {
+	return autoConvert_config_ExecEnvVar_To_v1beta1_ExecEnvVar(in, out, s)
 }
 
 func autoConvert_v1beta1_KubeletAnonymousAuthentication_To_config_KubeletAnonymousAuthentication(in *v1beta1.KubeletAnonymousAuthentication, out *config.KubeletAnonymousAuthentication, s conversion.Scope) error {
@@ -274,7 +407,9 @@ func autoConvert_v1beta1_KubeletConfiguration_To_config_KubeletConfiguration(in 
 	}
 	out.CgroupDriver = in.CgroupDriver
 	out.CPUManagerPolicy = in.CPUManagerPolicy
+	out.CPUManagerPolicyOptions = *(*map[string]string)(unsafe.Pointer(&in.CPUManagerPolicyOptions))
 	out.CPUManagerReconcilePeriod = in.CPUManagerReconcilePeriod
+	out.MemoryManagerPolicy = in.MemoryManagerPolicy
 	out.TopologyManagerPolicy = in.TopologyManagerPolicy
 	out.TopologyManagerScope = in.TopologyManagerScope
 	out.QOSReserved = *(*map[string]string)(unsafe.Pointer(&in.QOSReserved))
@@ -285,7 +420,9 @@ func autoConvert_v1beta1_KubeletConfiguration_To_config_KubeletConfiguration(in 
 	if err := v1.Convert_Pointer_int64_To_int64(&in.PodPidsLimit, &out.PodPidsLimit, s); err != nil {
 		return err
 	}
-	out.ResolverConfig = in.ResolverConfig
+	if err := v1.Convert_Pointer_string_To_string(&in.ResolverConfig, &out.ResolverConfig, s); err != nil {
+		return err
+	}
 	out.RunOnce = in.RunOnce
 	if err := v1.Convert_Pointer_bool_To_bool(&in.CPUCFSQuota, &out.CPUCFSQuota, s); err != nil {
 		return err
@@ -329,6 +466,9 @@ func autoConvert_v1beta1_KubeletConfiguration_To_config_KubeletConfiguration(in 
 	if err := v1.Convert_Pointer_bool_To_bool(&in.FailSwapOn, &out.FailSwapOn, s); err != nil {
 		return err
 	}
+	if err := Convert_v1beta1_MemorySwapConfiguration_To_config_MemorySwapConfiguration(&in.MemorySwap, &out.MemorySwap, s); err != nil {
+		return err
+	}
 	out.ContainerLogMaxSize = in.ContainerLogMaxSize
 	if err := v1.Convert_Pointer_int32_To_int32(&in.ContainerLogMaxFiles, &out.ContainerLogMaxFiles, s); err != nil {
 		return err
@@ -353,6 +493,22 @@ func autoConvert_v1beta1_KubeletConfiguration_To_config_KubeletConfiguration(in 
 	}
 	out.ShutdownGracePeriod = in.ShutdownGracePeriod
 	out.ShutdownGracePeriodCriticalPods = in.ShutdownGracePeriodCriticalPods
+	out.ShutdownGracePeriodByPodPriority = *(*[]config.ShutdownGracePeriodByPodPriority)(unsafe.Pointer(&in.ShutdownGracePeriodByPodPriority))
+	out.ReservedMemory = *(*[]config.MemoryReservation)(unsafe.Pointer(&in.ReservedMemory))
+	if err := v1.Convert_Pointer_bool_To_bool(&in.EnableProfilingHandler, &out.EnableProfilingHandler, s); err != nil {
+		return err
+	}
+	if err := v1.Convert_Pointer_bool_To_bool(&in.EnableDebugFlagsHandler, &out.EnableDebugFlagsHandler, s); err != nil {
+		return err
+	}
+	if err := v1.Convert_Pointer_bool_To_bool(&in.SeccompDefault, &out.SeccompDefault, s); err != nil {
+		return err
+	}
+	out.MemoryThrottlingFactor = (*float64)(unsafe.Pointer(in.MemoryThrottlingFactor))
+	out.RegisterWithTaints = *(*[]corev1.Taint)(unsafe.Pointer(&in.RegisterWithTaints))
+	if err := v1.Convert_Pointer_bool_To_bool(&in.RegisterNode, &out.RegisterNode, s); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -429,7 +585,9 @@ func autoConvert_config_KubeletConfiguration_To_v1beta1_KubeletConfiguration(in 
 	}
 	out.CgroupDriver = in.CgroupDriver
 	out.CPUManagerPolicy = in.CPUManagerPolicy
+	out.CPUManagerPolicyOptions = *(*map[string]string)(unsafe.Pointer(&in.CPUManagerPolicyOptions))
 	out.CPUManagerReconcilePeriod = in.CPUManagerReconcilePeriod
+	out.MemoryManagerPolicy = in.MemoryManagerPolicy
 	out.TopologyManagerPolicy = in.TopologyManagerPolicy
 	out.TopologyManagerScope = in.TopologyManagerScope
 	out.QOSReserved = *(*map[string]string)(unsafe.Pointer(&in.QOSReserved))
@@ -440,7 +598,9 @@ func autoConvert_config_KubeletConfiguration_To_v1beta1_KubeletConfiguration(in 
 	if err := v1.Convert_int64_To_Pointer_int64(&in.PodPidsLimit, &out.PodPidsLimit, s); err != nil {
 		return err
 	}
-	out.ResolverConfig = in.ResolverConfig
+	if err := v1.Convert_string_To_Pointer_string(&in.ResolverConfig, &out.ResolverConfig, s); err != nil {
+		return err
+	}
 	out.RunOnce = in.RunOnce
 	if err := v1.Convert_bool_To_Pointer_bool(&in.CPUCFSQuota, &out.CPUCFSQuota, s); err != nil {
 		return err
@@ -484,6 +644,9 @@ func autoConvert_config_KubeletConfiguration_To_v1beta1_KubeletConfiguration(in 
 	if err := v1.Convert_bool_To_Pointer_bool(&in.FailSwapOn, &out.FailSwapOn, s); err != nil {
 		return err
 	}
+	if err := Convert_config_MemorySwapConfiguration_To_v1beta1_MemorySwapConfiguration(&in.MemorySwap, &out.MemorySwap, s); err != nil {
+		return err
+	}
 	out.ContainerLogMaxSize = in.ContainerLogMaxSize
 	if err := v1.Convert_int32_To_Pointer_int32(&in.ContainerLogMaxFiles, &out.ContainerLogMaxFiles, s); err != nil {
 		return err
@@ -506,6 +669,22 @@ func autoConvert_config_KubeletConfiguration_To_v1beta1_KubeletConfiguration(in 
 	}
 	out.ShutdownGracePeriod = in.ShutdownGracePeriod
 	out.ShutdownGracePeriodCriticalPods = in.ShutdownGracePeriodCriticalPods
+	out.ShutdownGracePeriodByPodPriority = *(*[]v1beta1.ShutdownGracePeriodByPodPriority)(unsafe.Pointer(&in.ShutdownGracePeriodByPodPriority))
+	out.ReservedMemory = *(*[]v1beta1.MemoryReservation)(unsafe.Pointer(&in.ReservedMemory))
+	if err := v1.Convert_bool_To_Pointer_bool(&in.EnableProfilingHandler, &out.EnableProfilingHandler, s); err != nil {
+		return err
+	}
+	if err := v1.Convert_bool_To_Pointer_bool(&in.EnableDebugFlagsHandler, &out.EnableDebugFlagsHandler, s); err != nil {
+		return err
+	}
+	if err := v1.Convert_bool_To_Pointer_bool(&in.SeccompDefault, &out.SeccompDefault, s); err != nil {
+		return err
+	}
+	out.MemoryThrottlingFactor = (*float64)(unsafe.Pointer(in.MemoryThrottlingFactor))
+	out.RegisterWithTaints = *(*[]corev1.Taint)(unsafe.Pointer(&in.RegisterWithTaints))
+	if err := v1.Convert_bool_To_Pointer_bool(&in.RegisterNode, &out.RegisterNode, s); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -582,6 +761,48 @@ func Convert_config_KubeletX509Authentication_To_v1beta1_KubeletX509Authenticati
 	return autoConvert_config_KubeletX509Authentication_To_v1beta1_KubeletX509Authentication(in, out, s)
 }
 
+func autoConvert_v1beta1_MemoryReservation_To_config_MemoryReservation(in *v1beta1.MemoryReservation, out *config.MemoryReservation, s conversion.Scope) error {
+	out.NumaNode = in.NumaNode
+	out.Limits = *(*corev1.ResourceList)(unsafe.Pointer(&in.Limits))
+	return nil
+}
+
+// Convert_v1beta1_MemoryReservation_To_config_MemoryReservation is an autogenerated conversion function.
+func Convert_v1beta1_MemoryReservation_To_config_MemoryReservation(in *v1beta1.MemoryReservation, out *config.MemoryReservation, s conversion.Scope) error {
+	return autoConvert_v1beta1_MemoryReservation_To_config_MemoryReservation(in, out, s)
+}
+
+func autoConvert_config_MemoryReservation_To_v1beta1_MemoryReservation(in *config.MemoryReservation, out *v1beta1.MemoryReservation, s conversion.Scope) error {
+	out.NumaNode = in.NumaNode
+	out.Limits = *(*corev1.ResourceList)(unsafe.Pointer(&in.Limits))
+	return nil
+}
+
+// Convert_config_MemoryReservation_To_v1beta1_MemoryReservation is an autogenerated conversion function.
+func Convert_config_MemoryReservation_To_v1beta1_MemoryReservation(in *config.MemoryReservation, out *v1beta1.MemoryReservation, s conversion.Scope) error {
+	return autoConvert_config_MemoryReservation_To_v1beta1_MemoryReservation(in, out, s)
+}
+
+func autoConvert_v1beta1_MemorySwapConfiguration_To_config_MemorySwapConfiguration(in *v1beta1.MemorySwapConfiguration, out *config.MemorySwapConfiguration, s conversion.Scope) error {
+	out.SwapBehavior = in.SwapBehavior
+	return nil
+}
+
+// Convert_v1beta1_MemorySwapConfiguration_To_config_MemorySwapConfiguration is an autogenerated conversion function.
+func Convert_v1beta1_MemorySwapConfiguration_To_config_MemorySwapConfiguration(in *v1beta1.MemorySwapConfiguration, out *config.MemorySwapConfiguration, s conversion.Scope) error {
+	return autoConvert_v1beta1_MemorySwapConfiguration_To_config_MemorySwapConfiguration(in, out, s)
+}
+
+func autoConvert_config_MemorySwapConfiguration_To_v1beta1_MemorySwapConfiguration(in *config.MemorySwapConfiguration, out *v1beta1.MemorySwapConfiguration, s conversion.Scope) error {
+	out.SwapBehavior = in.SwapBehavior
+	return nil
+}
+
+// Convert_config_MemorySwapConfiguration_To_v1beta1_MemorySwapConfiguration is an autogenerated conversion function.
+func Convert_config_MemorySwapConfiguration_To_v1beta1_MemorySwapConfiguration(in *config.MemorySwapConfiguration, out *v1beta1.MemorySwapConfiguration, s conversion.Scope) error {
+	return autoConvert_config_MemorySwapConfiguration_To_v1beta1_MemorySwapConfiguration(in, out, s)
+}
+
 func autoConvert_v1beta1_SerializedNodeConfigSource_To_config_SerializedNodeConfigSource(in *v1beta1.SerializedNodeConfigSource, out *config.SerializedNodeConfigSource, s conversion.Scope) error {
 	out.Source = in.Source
 	return nil
@@ -600,4 +821,26 @@ func autoConvert_config_SerializedNodeConfigSource_To_v1beta1_SerializedNodeConf
 // Convert_config_SerializedNodeConfigSource_To_v1beta1_SerializedNodeConfigSource is an autogenerated conversion function.
 func Convert_config_SerializedNodeConfigSource_To_v1beta1_SerializedNodeConfigSource(in *config.SerializedNodeConfigSource, out *v1beta1.SerializedNodeConfigSource, s conversion.Scope) error {
 	return autoConvert_config_SerializedNodeConfigSource_To_v1beta1_SerializedNodeConfigSource(in, out, s)
+}
+
+func autoConvert_v1beta1_ShutdownGracePeriodByPodPriority_To_config_ShutdownGracePeriodByPodPriority(in *v1beta1.ShutdownGracePeriodByPodPriority, out *config.ShutdownGracePeriodByPodPriority, s conversion.Scope) error {
+	out.Priority = in.Priority
+	out.ShutdownGracePeriodSeconds = in.ShutdownGracePeriodSeconds
+	return nil
+}
+
+// Convert_v1beta1_ShutdownGracePeriodByPodPriority_To_config_ShutdownGracePeriodByPodPriority is an autogenerated conversion function.
+func Convert_v1beta1_ShutdownGracePeriodByPodPriority_To_config_ShutdownGracePeriodByPodPriority(in *v1beta1.ShutdownGracePeriodByPodPriority, out *config.ShutdownGracePeriodByPodPriority, s conversion.Scope) error {
+	return autoConvert_v1beta1_ShutdownGracePeriodByPodPriority_To_config_ShutdownGracePeriodByPodPriority(in, out, s)
+}
+
+func autoConvert_config_ShutdownGracePeriodByPodPriority_To_v1beta1_ShutdownGracePeriodByPodPriority(in *config.ShutdownGracePeriodByPodPriority, out *v1beta1.ShutdownGracePeriodByPodPriority, s conversion.Scope) error {
+	out.Priority = in.Priority
+	out.ShutdownGracePeriodSeconds = in.ShutdownGracePeriodSeconds
+	return nil
+}
+
+// Convert_config_ShutdownGracePeriodByPodPriority_To_v1beta1_ShutdownGracePeriodByPodPriority is an autogenerated conversion function.
+func Convert_config_ShutdownGracePeriodByPodPriority_To_v1beta1_ShutdownGracePeriodByPodPriority(in *config.ShutdownGracePeriodByPodPriority, out *v1beta1.ShutdownGracePeriodByPodPriority, s conversion.Scope) error {
+	return autoConvert_config_ShutdownGracePeriodByPodPriority_To_v1beta1_ShutdownGracePeriodByPodPriority(in, out, s)
 }

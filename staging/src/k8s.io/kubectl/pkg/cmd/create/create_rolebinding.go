@@ -38,14 +38,14 @@ import (
 
 var (
 	roleBindingLong = templates.LongDesc(i18n.T(`
-		Create a RoleBinding for a particular Role or ClusterRole.`))
+		Create a role binding for a particular role or cluster role.`))
 
 	roleBindingExample = templates.Examples(i18n.T(`
-		  # Create a RoleBinding for user1, user2, and group1 using the admin ClusterRole
+		  # Create a role binding for user1, user2, and group1 using the admin cluster role
 		  kubectl create rolebinding admin --clusterrole=admin --user=user1 --user=user2 --group=group1`))
 )
 
-// RoleBindingOpts holds the options for 'create rolebinding' sub command
+// RoleBindingOptions holds the options for 'create rolebinding' sub command
 type RoleBindingOptions struct {
 	PrintFlags *genericclioptions.PrintFlags
 	PrintObj   func(obj runtime.Object) error
@@ -61,9 +61,10 @@ type RoleBindingOptions struct {
 	FieldManager     string
 	CreateAnnotation bool
 
-	Client         rbacclientv1.RbacV1Interface
-	DryRunStrategy cmdutil.DryRunStrategy
-	DryRunVerifier *resource.DryRunVerifier
+	Client              rbacclientv1.RbacV1Interface
+	DryRunStrategy      cmdutil.DryRunStrategy
+	DryRunVerifier      *resource.QueryParamVerifier
+	ValidationDirective string
 
 	genericclioptions.IOStreams
 }
@@ -86,7 +87,7 @@ func NewCmdCreateRoleBinding(f cmdutil.Factory, ioStreams genericclioptions.IOSt
 	cmd := &cobra.Command{
 		Use:                   "rolebinding NAME --clusterrole=NAME|--role=NAME [--user=username] [--group=groupname] [--serviceaccount=namespace:serviceaccountname] [--dry-run=server|client|none]",
 		DisableFlagsInUseLine: true,
-		Short:                 i18n.T("Create a RoleBinding for a particular Role or ClusterRole"),
+		Short:                 i18n.T("Create a role binding for a particular role or cluster role"),
 		Long:                  roleBindingLong,
 		Example:               roleBindingExample,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -136,15 +137,11 @@ func (o *RoleBindingOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, arg
 	if err != nil {
 		return err
 	}
-	dynamicCient, err := f.DynamicClient()
+	dynamicClient, err := f.DynamicClient()
 	if err != nil {
 		return err
 	}
-	discoveryClient, err := f.ToDiscoveryClient()
-	if err != nil {
-		return err
-	}
-	o.DryRunVerifier = resource.NewDryRunVerifier(dynamicCient, discoveryClient)
+	o.DryRunVerifier = resource.NewQueryParamVerifier(dynamicClient, f.OpenAPIGetter(), resource.QueryParamDryRun)
 	cmdutil.PrintFlagsWithDryRunStrategy(o.PrintFlags, o.DryRunStrategy)
 	printer, err := o.PrintFlags.ToPrinter()
 	if err != nil {
@@ -152,6 +149,11 @@ func (o *RoleBindingOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, arg
 	}
 	o.PrintObj = func(obj runtime.Object) error {
 		return printer.PrintObj(obj, o.Out)
+	}
+
+	o.ValidationDirective, err = cmdutil.GetValidationDirective(cmd)
+	if err != nil {
+		return err
 	}
 	return nil
 }
@@ -182,6 +184,7 @@ func (o *RoleBindingOptions) Run() error {
 		if o.FieldManager != "" {
 			createOptions.FieldManager = o.FieldManager
 		}
+		createOptions.FieldValidation = o.ValidationDirective
 		if o.DryRunStrategy == cmdutil.DryRunServer {
 			if err := o.DryRunVerifier.HasSupport(roleBinding.GroupVersionKind()); err != nil {
 				return err

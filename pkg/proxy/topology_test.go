@@ -17,461 +17,517 @@ limitations under the License.
 package proxy
 
 import (
-	"reflect"
+	"fmt"
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
+	kerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/apimachinery/pkg/util/sets"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
+	"k8s.io/kubernetes/pkg/features"
 )
 
-func TestFilterTopologyEndpoint(t *testing.T) {
-	type endpoint struct {
-		Endpoint string
-		NodeName types.NodeName
-	}
-	testCases := []struct {
-		Name            string
-		nodeLabels      map[types.NodeName]map[string]string
-		endpoints       []endpoint
-		currentNodeName types.NodeName
-		topologyKeys    []string
-		expected        []endpoint
-	}{
-		{
-			// Case[0]: no topology key and endpoints at all = 0 endpoints
-			Name: "no topology key and endpoints",
-			nodeLabels: map[types.NodeName]map[string]string{
-				"testNode1": {
-					"kubernetes.io/hostname":        "10.0.0.1",
-					"topology.kubernetes.io/zone":   "90001",
-					"topology.kubernetes.io/region": "cd",
-				}},
-			endpoints:       []endpoint{},
-			currentNodeName: "testNode1",
-			topologyKeys:    nil,
-			expected:        []endpoint{},
-		},
-		{
-			// Case[1]: no topology key, 2 nodes each with 2 endpoints = 4
-			// endpoints
-			Name: "no topology key but have endpoints",
-			nodeLabels: map[types.NodeName]map[string]string{
-				"testNode1": {
-					"kubernetes.io/hostname":        "testNode1",
-					"topology.kubernetes.io/zone":   "90001",
-					"topology.kubernetes.io/region": "cd",
-				},
-				"testNode2": {
-					"kubernetes.io/hostname":        "testNode2",
-					"topology.kubernetes.io/zone":   "90001",
-					"topology.kubernetes.io/region": "cd",
-				},
-			},
-			endpoints: []endpoint{
-				{Endpoint: "1.1.1.1:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.1.2:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.2.1:11", NodeName: "testNode2"},
-				{Endpoint: "1.1.2.2:11", NodeName: "testNode2"},
-			},
-			currentNodeName: "testNode1",
-			topologyKeys:    nil,
-			expected: []endpoint{
-				{Endpoint: "1.1.1.1:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.1.2:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.2.1:11", NodeName: "testNode2"},
-				{Endpoint: "1.1.2.2:11", NodeName: "testNode2"},
-			},
-		},
-		{
-			// Case[2]: 1 topology key (hostname), 2 nodes each with 2 endpoints
-			// 1 match = 2 endpoints
-			Name: "one topology key with one node matched",
-			nodeLabels: map[types.NodeName]map[string]string{
-				"testNode1": {
-					"kubernetes.io/hostname":        "testNode1",
-					"topology.kubernetes.io/zone":   "90001",
-					"topology.kubernetes.io/region": "cd",
-				},
-				"testNode2": {
-					"kubernetes.io/hostname":        "testNode2",
-					"topology.kubernetes.io/zone":   "90001",
-					"topology.kubernetes.io/region": "cd",
-				},
-			},
-			endpoints: []endpoint{
-				{Endpoint: "1.1.1.1:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.1.2:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.2.1:11", NodeName: "testNode2"},
-				{Endpoint: "1.1.2.2:11", NodeName: "testNode2"},
-			},
-			currentNodeName: "testNode1",
-			topologyKeys:    []string{"kubernetes.io/hostname"},
-			expected: []endpoint{
-				{Endpoint: "1.1.1.1:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.1.2:11", NodeName: "testNode1"},
-			},
-		},
-		{
-			// Case[3]: 1 topology key (hostname), 2 nodes each with 2 endpoints
-			// no match = 0 endpoints
-			Name: "one topology key without node matched",
-			nodeLabels: map[types.NodeName]map[string]string{
-				"testNode1": {
-					"kubernetes.io/hostname":        "testNode1",
-					"topology.kubernetes.io/zone":   "90001",
-					"topology.kubernetes.io/region": "cd",
-				},
-				"testNode2": {
-					"kubernetes.io/hostname":        "testNode2",
-					"topology.kubernetes.io/zone":   "90001",
-					"topology.kubernetes.io/region": "cd",
-				},
-				"testNode3": {
-					"kubernetes.io/hostname":        "testNode3",
-					"topology.kubernetes.io/zone":   "90001",
-					"topology.kubernetes.io/region": "cd",
-				},
-			},
-			endpoints: []endpoint{
-				{Endpoint: "1.1.1.1:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.1.2:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.2.1:11", NodeName: "testNode2"},
-				{Endpoint: "1.1.2.2:11", NodeName: "testNode2"},
-			},
-			currentNodeName: "testNode3",
-			topologyKeys:    []string{"kubernetes.io/hostname"},
-			expected:        []endpoint{},
-		},
-		{
-			// Case[4]: 1 topology key (zone), 2 nodes in zone a, 2 nodes in
-			// zone b, each with 2 endpoints = 4 endpoints
-			Name: "one topology key with multiple nodes matched",
-			nodeLabels: map[types.NodeName]map[string]string{
-				"testNode1": {
-					"kubernetes.io/hostname":        "testNode1",
-					"topology.kubernetes.io/zone":   "90001",
-					"topology.kubernetes.io/region": "cd",
-				},
-				"testNode2": {
-					"kubernetes.io/hostname":        "testNode2",
-					"topology.kubernetes.io/zone":   "90001",
-					"topology.kubernetes.io/region": "cd",
-				},
-				"testNode3": {
-					"kubernetes.io/hostname":        "testNode3",
-					"topology.kubernetes.io/zone":   "90002",
-					"topology.kubernetes.io/region": "cd",
-				},
-				"testNode4": {
-					"kubernetes.io/hostname":        "testNode4",
-					"topology.kubernetes.io/zone":   "90002",
-					"topology.kubernetes.io/region": "cd",
-				},
-			},
-			endpoints: []endpoint{
-				{Endpoint: "1.1.1.1:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.1.2:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.2.1:11", NodeName: "testNode2"},
-				{Endpoint: "1.1.2.2:11", NodeName: "testNode2"},
-				{Endpoint: "1.1.3.1:11", NodeName: "testNode3"},
-				{Endpoint: "1.1.3.2:11", NodeName: "testNode3"},
-				{Endpoint: "1.1.4.1:11", NodeName: "testNode4"},
-				{Endpoint: "1.1.4.2:11", NodeName: "testNode4"},
-			},
-			currentNodeName: "testNode2",
-			topologyKeys:    []string{"topology.kubernetes.io/zone"},
-			expected: []endpoint{
-				{Endpoint: "1.1.1.1:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.1.2:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.2.1:11", NodeName: "testNode2"},
-				{Endpoint: "1.1.2.2:11", NodeName: "testNode2"},
-			},
-		},
-		{
-			// Case[5]: 2 topology keys (hostname, zone), 2 nodes each with 2
-			// endpoints, 1 hostname match = 2 endpoints (2nd key ignored)
-			Name: "early match in multiple topology keys",
-			nodeLabels: map[types.NodeName]map[string]string{
-				"testNode1": {
-					"kubernetes.io/hostname":        "testNode1",
-					"topology.kubernetes.io/zone":   "90001",
-					"topology.kubernetes.io/region": "cd",
-				},
-				"testNode2": {
-					"kubernetes.io/hostname":        "testNode2",
-					"topology.kubernetes.io/zone":   "90001",
-					"topology.kubernetes.io/region": "cd",
-				},
-				"testNode3": {
-					"kubernetes.io/hostname":        "testNode3",
-					"topology.kubernetes.io/zone":   "90002",
-					"topology.kubernetes.io/region": "cd",
-				},
-				"testNode4": {
-					"kubernetes.io/hostname":        "testNode4",
-					"topology.kubernetes.io/zone":   "90002",
-					"topology.kubernetes.io/region": "cd",
-				},
-			},
-			endpoints: []endpoint{
-				{Endpoint: "1.1.1.1:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.1.2:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.2.1:11", NodeName: "testNode2"},
-				{Endpoint: "1.1.2.2:11", NodeName: "testNode2"},
-				{Endpoint: "1.1.3.1:11", NodeName: "testNode3"},
-				{Endpoint: "1.1.3.2:11", NodeName: "testNode3"},
-				{Endpoint: "1.1.4.1:11", NodeName: "testNode4"},
-				{Endpoint: "1.1.4.2:11", NodeName: "testNode4"},
-			},
-			currentNodeName: "testNode2",
-			topologyKeys:    []string{"kubernetes.io/hostname"},
-			expected: []endpoint{
-				{Endpoint: "1.1.2.1:11", NodeName: "testNode2"},
-				{Endpoint: "1.1.2.2:11", NodeName: "testNode2"},
-			},
-		},
-		{
-			// Case[6]: 2 topology keys (hostname, zone), 2 nodes in zone a, 2
-			// nodes in zone b, each with 2 endpoints, no hostname match, 1 zone
-			// match = 4 endpoints
-			Name: "later match in multiple topology keys",
-			nodeLabels: map[types.NodeName]map[string]string{
-				"testNode1": {
-					"kubernetes.io/hostname":        "testNode1",
-					"topology.kubernetes.io/zone":   "90001",
-					"topology.kubernetes.io/region": "cd",
-				},
-				"testNode2": {
-					"kubernetes.io/hostname":        "testNode2",
-					"topology.kubernetes.io/zone":   "90001",
-					"topology.kubernetes.io/region": "cd",
-				},
-				"testNode3": {
-					"kubernetes.io/hostname":        "testNode3",
-					"topology.kubernetes.io/zone":   "90002",
-					"topology.kubernetes.io/region": "cd",
-				},
-				"testNode4": {
-					"kubernetes.io/hostname":        "testNode4",
-					"topology.kubernetes.io/zone":   "90002",
-					"topology.kubernetes.io/region": "cd",
-				},
-				"testNode5": {
-					"kubernetes.io/hostname":        "testNode5",
-					"topology.kubernetes.io/zone":   "90002",
-					"topology.kubernetes.io/region": "cd",
-				},
-			},
-			endpoints: []endpoint{
-				{Endpoint: "1.1.1.1:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.1.2:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.2.1:11", NodeName: "testNode2"},
-				{Endpoint: "1.1.2.2:11", NodeName: "testNode2"},
-				{Endpoint: "1.1.3.1:11", NodeName: "testNode3"},
-				{Endpoint: "1.1.3.2:11", NodeName: "testNode3"},
-				{Endpoint: "1.1.4.1:11", NodeName: "testNode4"},
-				{Endpoint: "1.1.4.2:11", NodeName: "testNode4"},
-			},
-			currentNodeName: "testNode5",
-			topologyKeys:    []string{"kubernetes.io/hostname", "topology.kubernetes.io/zone"},
-			expected: []endpoint{
-				{Endpoint: "1.1.3.1:11", NodeName: "testNode3"},
-				{Endpoint: "1.1.3.2:11", NodeName: "testNode3"},
-				{Endpoint: "1.1.4.1:11", NodeName: "testNode4"},
-				{Endpoint: "1.1.4.2:11", NodeName: "testNode4"},
-			},
-		},
-		{
-			// Case[7]: 2 topology keys (hostname, zone), 2 nodes in zone a, 2
-			// nodes in zone b, each with 2 endpoints, no hostname match, no zone
-			// match = 0 endpoints
-			Name: "multiple topology keys without node matched",
-			nodeLabels: map[types.NodeName]map[string]string{
-				"testNode1": {
-					"kubernetes.io/hostname":        "testNode1",
-					"topology.kubernetes.io/zone":   "90001",
-					"topology.kubernetes.io/region": "cd",
-				},
-				"testNode2": {
-					"kubernetes.io/hostname":        "testNode2",
-					"topology.kubernetes.io/zone":   "90001",
-					"topology.kubernetes.io/region": "cd",
-				},
-				"testNode3": {
-					"kubernetes.io/hostname":        "testNode3",
-					"topology.kubernetes.io/zone":   "90002",
-					"topology.kubernetes.io/region": "cd",
-				},
-				"testNode4": {
-					"kubernetes.io/hostname":        "testNode4",
-					"topology.kubernetes.io/zone":   "90002",
-					"topology.kubernetes.io/region": "cd",
-				},
-				"testNode5": {
-					"kubernetes.io/hostname":        "testNode5",
-					"topology.kubernetes.io/zone":   "90003",
-					"topology.kubernetes.io/region": "cd",
-				},
-			},
-			endpoints: []endpoint{
-				{Endpoint: "1.1.1.1:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.1.2:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.2.1:11", NodeName: "testNode2"},
-				{Endpoint: "1.1.2.2:11", NodeName: "testNode2"},
-				{Endpoint: "1.1.3.1:11", NodeName: "testNode3"},
-				{Endpoint: "1.1.3.2:11", NodeName: "testNode3"},
-				{Endpoint: "1.1.4.1:11", NodeName: "testNode4"},
-				{Endpoint: "1.1.4.2:11", NodeName: "testNode4"},
-			},
-			currentNodeName: "testNode5",
-			topologyKeys:    []string{"kubernetes.io/hostname", "topology.kubernetes.io/zone"},
-			expected:        []endpoint{},
-		},
-		{
-			// Case[8]: 2 topology keys (hostname, "*"), 2 nodes each with 2
-			// endpoints, 1 match hostname = 2 endpoints
-			Name: "multiple topology keys matched node when 'Any' key ignored",
-			nodeLabels: map[types.NodeName]map[string]string{
-				"testNode1": {
-					"kubernetes.io/hostname":        "testNode1",
-					"topology.kubernetes.io/zone":   "90001",
-					"topology.kubernetes.io/region": "cd",
-				},
-				"testNode2": {
-					"kubernetes.io/hostname":        "testNode2",
-					"topology.kubernetes.io/zone":   "90001",
-					"topology.kubernetes.io/region": "cd",
-				},
-			},
-			endpoints: []endpoint{
-				{Endpoint: "1.1.1.1:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.1.2:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.2.1:11", NodeName: "testNode2"},
-				{Endpoint: "1.1.2.2:11", NodeName: "testNode2"},
-			},
-			currentNodeName: "testNode1",
-			topologyKeys:    []string{"kubernetes.io/hostname", v1.TopologyKeyAny},
-			expected: []endpoint{
-				{Endpoint: "1.1.1.1:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.1.2:11", NodeName: "testNode1"},
-			},
-		},
-		{
-			// Case[9]: 2 topology keys (hostname, "*"), 2 nodes each with 2
-			// endpoints, no hostname match, catch-all ("*") matched with 4
-			// endpoints
-			Name: "two topology keys matched node with 'Any' key",
-			nodeLabels: map[types.NodeName]map[string]string{
-				"testNode1": {
-					"kubernetes.io/hostname":        "testNode1",
-					"topology.kubernetes.io/zone":   "90001",
-					"topology.kubernetes.io/region": "cd",
-				},
-				"testNode2": {
-					"kubernetes.io/hostname":        "testNode2",
-					"topology.kubernetes.io/zone":   "90001",
-					"topology.kubernetes.io/region": "cd",
-				},
-				"testNode3": {
-					"kubernetes.io/hostname":        "testNode3",
-					"topology.kubernetes.io/zone":   "90001",
-					"topology.kubernetes.io/region": "cd",
-				},
-			},
-			endpoints: []endpoint{
-				{Endpoint: "1.1.1.1:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.1.2:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.2.1:11", NodeName: "testNode2"},
-				{Endpoint: "1.1.2.2:11", NodeName: "testNode2"},
-			},
-			currentNodeName: "testNode3",
-			topologyKeys:    []string{"kubernetes.io/hostname", v1.TopologyKeyAny},
-			expected: []endpoint{
-				{Endpoint: "1.1.1.1:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.1.2:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.2.1:11", NodeName: "testNode2"},
-				{Endpoint: "1.1.2.2:11", NodeName: "testNode2"},
-			},
-		},
-		{
-			// Case[10]: 3 topology keys (hostname, zone, "*"), 2 nodes in zone a,
-			// 2 nodes in zone b, each with 2 endpoints, no hostname match, no
-			// zone, catch-all ("*") matched with 8 endpoints
-			Name: "multiple topology keys matched node with 'Any' key",
-			nodeLabels: map[types.NodeName]map[string]string{
-				"testNode1": {
-					"kubernetes.io/hostname":        "testNode1",
-					"topology.kubernetes.io/zone":   "90001",
-					"topology.kubernetes.io/region": "cd",
-				},
-				"testNode2": {
-					"kubernetes.io/hostname":        "testNode2",
-					"topology.kubernetes.io/zone":   "90001",
-					"topology.kubernetes.io/region": "cd",
-				},
-				"testNode3": {
-					"kubernetes.io/hostname":        "testNode3",
-					"topology.kubernetes.io/zone":   "90002",
-					"topology.kubernetes.io/region": "cd",
-				},
-				"testNode4": {
-					"kubernetes.io/hostname":        "testNode4",
-					"topology.kubernetes.io/zone":   "90002",
-					"topology.kubernetes.io/region": "cd",
-				},
-				"testNode5": {
-					"kubernetes.io/hostname":        "testNode5",
-					"topology.kubernetes.io/zone":   "90003",
-					"topology.kubernetes.io/region": "cd",
-				},
-			},
-			endpoints: []endpoint{
-				{Endpoint: "1.1.1.1:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.1.2:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.2.1:11", NodeName: "testNode2"},
-				{Endpoint: "1.1.2.2:11", NodeName: "testNode2"},
-				{Endpoint: "1.1.3.1:11", NodeName: "testNode3"},
-				{Endpoint: "1.1.3.2:11", NodeName: "testNode3"},
-				{Endpoint: "1.1.4.1:11", NodeName: "testNode4"},
-				{Endpoint: "1.1.4.2:11", NodeName: "testNode4"},
-			},
-			currentNodeName: "testNode5",
-			topologyKeys:    []string{"kubernetes.io/hostname", "topology.kubernetes.io/zone", v1.TopologyKeyAny},
-			expected: []endpoint{
-				{Endpoint: "1.1.1.1:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.1.2:11", NodeName: "testNode1"},
-				{Endpoint: "1.1.2.1:11", NodeName: "testNode2"},
-				{Endpoint: "1.1.2.2:11", NodeName: "testNode2"},
-				{Endpoint: "1.1.3.1:11", NodeName: "testNode3"},
-				{Endpoint: "1.1.3.2:11", NodeName: "testNode3"},
-				{Endpoint: "1.1.4.1:11", NodeName: "testNode4"},
-				{Endpoint: "1.1.4.2:11", NodeName: "testNode4"},
-			},
-		},
-	}
-	endpointsToStringArray := func(endpoints []endpoint) []string {
-		result := make([]string, 0, len(endpoints))
-		for _, ep := range endpoints {
-			result = append(result, ep.Endpoint)
+func checkExpectedEndpoints(expected sets.String, actual []Endpoint) error {
+	var errs []error
+
+	expectedCopy := sets.NewString(expected.UnsortedList()...)
+	for _, ep := range actual {
+		if !expectedCopy.Has(ep.String()) {
+			errs = append(errs, fmt.Errorf("unexpected endpoint %v", ep))
 		}
-		return result
+		expectedCopy.Delete(ep.String())
 	}
+	if len(expectedCopy) > 0 {
+		errs = append(errs, fmt.Errorf("missing endpoints %v", expectedCopy.UnsortedList()))
+	}
+
+	return kerrors.NewAggregate(errs)
+}
+
+func TestCategorizeEndpoints(t *testing.T) {
+	testCases := []struct {
+		name         string
+		hintsEnabled bool
+		pteEnabled   bool
+		nodeLabels   map[string]string
+		serviceInfo  ServicePort
+		endpoints    []Endpoint
+
+		// We distinguish `nil` ("service doesn't use this kind of endpoints") from
+		// `sets.String()` ("service uses this kind of endpoints but has no endpoints").
+		// allEndpoints can be left unset if only one of clusterEndpoints and
+		// localEndpoints is set, and allEndpoints is identical to it.
+		// onlyRemoteEndpoints should be true if CategorizeEndpoints returns true for
+		// hasAnyEndpoints despite allEndpoints being empty.
+		clusterEndpoints    sets.String
+		localEndpoints      sets.String
+		allEndpoints        sets.String
+		onlyRemoteEndpoints bool
+	}{{
+		name:         "hints enabled, hints annotation == auto",
+		hintsEnabled: true,
+		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
+		serviceInfo:  &BaseServiceInfo{hintsAnnotation: "auto"},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+		},
+		clusterEndpoints: sets.NewString("10.1.2.3:80", "10.1.2.6:80"),
+		localEndpoints:   nil,
+	}, {
+		name:         "hints, hints annotation == disabled, hints ignored",
+		hintsEnabled: true,
+		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
+		serviceInfo:  &BaseServiceInfo{hintsAnnotation: "disabled"},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+		},
+		clusterEndpoints: sets.NewString("10.1.2.3:80", "10.1.2.4:80", "10.1.2.5:80", "10.1.2.6:80"),
+		localEndpoints:   nil,
+	}, {
+		name:         "hints disabled, hints annotation == auto",
+		hintsEnabled: false,
+		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
+		serviceInfo:  &BaseServiceInfo{hintsAnnotation: "auto"},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+		},
+		clusterEndpoints: sets.NewString("10.1.2.3:80", "10.1.2.4:80", "10.1.2.5:80", "10.1.2.6:80"),
+		localEndpoints:   nil,
+	}, {
+
+		name:         "hints, hints annotation == aUto (wrong capitalization), hints ignored",
+		hintsEnabled: true,
+		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
+		serviceInfo:  &BaseServiceInfo{hintsAnnotation: "aUto"},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+		},
+		clusterEndpoints: sets.NewString("10.1.2.3:80", "10.1.2.4:80", "10.1.2.5:80", "10.1.2.6:80"),
+		localEndpoints:   nil,
+	}, {
+		name:         "hints, hints annotation empty, hints ignored",
+		hintsEnabled: true,
+		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
+		serviceInfo:  &BaseServiceInfo{},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+		},
+		clusterEndpoints: sets.NewString("10.1.2.3:80", "10.1.2.4:80", "10.1.2.5:80", "10.1.2.6:80"),
+		localEndpoints:   nil,
+	}, {
+		name:         "externalTrafficPolicy: Local, topology ignored for Local endpoints",
+		hintsEnabled: true,
+		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
+		serviceInfo:  &BaseServiceInfo{externalPolicyLocal: true, nodePort: 8080, hintsAnnotation: "auto"},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true, IsLocal: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true, IsLocal: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+		},
+		clusterEndpoints: sets.NewString("10.1.2.3:80", "10.1.2.6:80"),
+		localEndpoints:   sets.NewString("10.1.2.3:80", "10.1.2.4:80"),
+		allEndpoints:     sets.NewString("10.1.2.3:80", "10.1.2.4:80", "10.1.2.6:80"),
+	}, {
+		name:         "internalTrafficPolicy: Local, topology ignored for Local endpoints",
+		hintsEnabled: true,
+		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
+		serviceInfo:  &BaseServiceInfo{internalPolicyLocal: true, hintsAnnotation: "auto", externalPolicyLocal: false, nodePort: 8080},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true, IsLocal: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true, IsLocal: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+		},
+		clusterEndpoints: sets.NewString("10.1.2.3:80", "10.1.2.6:80"),
+		localEndpoints:   sets.NewString("10.1.2.3:80", "10.1.2.4:80"),
+		allEndpoints:     sets.NewString("10.1.2.3:80", "10.1.2.4:80", "10.1.2.6:80"),
+	}, {
+		name:         "empty node labels",
+		hintsEnabled: true,
+		nodeLabels:   map[string]string{},
+		serviceInfo:  &BaseServiceInfo{hintsAnnotation: "auto"},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+		},
+		clusterEndpoints: sets.NewString("10.1.2.3:80"),
+		localEndpoints:   nil,
+	}, {
+		name:         "empty zone label",
+		hintsEnabled: true,
+		nodeLabels:   map[string]string{v1.LabelTopologyZone: ""},
+		serviceInfo:  &BaseServiceInfo{hintsAnnotation: "auto"},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+		},
+		clusterEndpoints: sets.NewString("10.1.2.3:80"),
+		localEndpoints:   nil,
+	}, {
+		name:         "node in different zone, no endpoint filtering",
+		hintsEnabled: true,
+		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-b"},
+		serviceInfo:  &BaseServiceInfo{hintsAnnotation: "auto"},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+		},
+		clusterEndpoints: sets.NewString("10.1.2.3:80"),
+		localEndpoints:   nil,
+	}, {
+		name:         "normal endpoint filtering, auto annotation",
+		hintsEnabled: true,
+		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
+		serviceInfo:  &BaseServiceInfo{hintsAnnotation: "auto"},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+		},
+		clusterEndpoints: sets.NewString("10.1.2.3:80", "10.1.2.6:80"),
+		localEndpoints:   nil,
+	}, {
+		name:         "unready endpoint",
+		hintsEnabled: true,
+		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
+		serviceInfo:  &BaseServiceInfo{hintsAnnotation: "auto"},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: false},
+		},
+		clusterEndpoints: sets.NewString("10.1.2.3:80"),
+		localEndpoints:   nil,
+	}, {
+		name:         "only unready endpoints in same zone (should not filter)",
+		hintsEnabled: true,
+		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
+		serviceInfo:  &BaseServiceInfo{hintsAnnotation: "auto"},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: false},
+			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: false},
+		},
+		clusterEndpoints: sets.NewString("10.1.2.4:80", "10.1.2.5:80"),
+		localEndpoints:   nil,
+	}, {
+		name:         "normal endpoint filtering, Auto annotation",
+		hintsEnabled: true,
+		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
+		serviceInfo:  &BaseServiceInfo{hintsAnnotation: "Auto"},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+		},
+		clusterEndpoints: sets.NewString("10.1.2.3:80", "10.1.2.6:80"),
+		localEndpoints:   nil,
+	}, {
+		name:         "hintsAnnotation empty, no filtering applied",
+		hintsEnabled: true,
+		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
+		serviceInfo:  &BaseServiceInfo{hintsAnnotation: ""},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+		},
+		clusterEndpoints: sets.NewString("10.1.2.3:80", "10.1.2.4:80", "10.1.2.5:80", "10.1.2.6:80"),
+		localEndpoints:   nil,
+	}, {
+		name:         "hintsAnnotation disabled, no filtering applied",
+		hintsEnabled: true,
+		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
+		serviceInfo:  &BaseServiceInfo{hintsAnnotation: "disabled"},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+		},
+		clusterEndpoints: sets.NewString("10.1.2.3:80", "10.1.2.4:80", "10.1.2.5:80", "10.1.2.6:80"),
+		localEndpoints:   nil,
+	}, {
+		name:         "missing hints, no filtering applied",
+		hintsEnabled: true,
+		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
+		serviceInfo:  &BaseServiceInfo{hintsAnnotation: "auto"},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: nil, Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-a"), Ready: true},
+		},
+		clusterEndpoints: sets.NewString("10.1.2.3:80", "10.1.2.4:80", "10.1.2.5:80", "10.1.2.6:80"),
+		localEndpoints:   nil,
+	}, {
+		name:         "multiple hints per endpoint, filtering includes any endpoint with zone included",
+		hintsEnabled: true,
+		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-c"},
+		serviceInfo:  &BaseServiceInfo{hintsAnnotation: "auto"},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.1.2.3:80", ZoneHints: sets.NewString("zone-a", "zone-b", "zone-c"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.4:80", ZoneHints: sets.NewString("zone-b", "zone-c"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.5:80", ZoneHints: sets.NewString("zone-b", "zone-d"), Ready: true},
+			&BaseEndpointInfo{Endpoint: "10.1.2.6:80", ZoneHints: sets.NewString("zone-c"), Ready: true},
+		},
+		clusterEndpoints: sets.NewString("10.1.2.3:80", "10.1.2.4:80", "10.1.2.6:80"),
+		localEndpoints:   nil,
+	}, {
+		name:         "conflicting topology and localness require merging allEndpoints",
+		hintsEnabled: true,
+		nodeLabels:   map[string]string{v1.LabelTopologyZone: "zone-a"},
+		serviceInfo:  &BaseServiceInfo{internalPolicyLocal: false, externalPolicyLocal: true, nodePort: 8080, hintsAnnotation: "auto"},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", ZoneHints: sets.NewString("zone-a"), Ready: true, IsLocal: true},
+			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", ZoneHints: sets.NewString("zone-b"), Ready: true, IsLocal: true},
+			&BaseEndpointInfo{Endpoint: "10.0.0.2:80", ZoneHints: sets.NewString("zone-a"), Ready: true, IsLocal: false},
+			&BaseEndpointInfo{Endpoint: "10.0.0.3:80", ZoneHints: sets.NewString("zone-b"), Ready: true, IsLocal: false},
+		},
+		clusterEndpoints: sets.NewString("10.0.0.0:80", "10.0.0.2:80"),
+		localEndpoints:   sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
+		allEndpoints:     sets.NewString("10.0.0.0:80", "10.0.0.1:80", "10.0.0.2:80"),
+	}, {
+		name:             "internalTrafficPolicy: Local, with empty endpoints",
+		serviceInfo:      &BaseServiceInfo{internalPolicyLocal: true},
+		endpoints:        []Endpoint{},
+		clusterEndpoints: nil,
+		localEndpoints:   sets.NewString(),
+	}, {
+		name:        "internalTrafficPolicy: Local, but all endpoints are remote",
+		serviceInfo: &BaseServiceInfo{internalPolicyLocal: true},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: true, IsLocal: false},
+			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: true, IsLocal: false},
+		},
+		clusterEndpoints:    nil,
+		localEndpoints:      sets.NewString(),
+		onlyRemoteEndpoints: true,
+	}, {
+		name:        "internalTrafficPolicy: Local, all endpoints are local",
+		serviceInfo: &BaseServiceInfo{internalPolicyLocal: true},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: true, IsLocal: true},
+			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: true, IsLocal: true},
+		},
+		clusterEndpoints: nil,
+		localEndpoints:   sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
+	}, {
+		name:        "internalTrafficPolicy: Local, some endpoints are local",
+		serviceInfo: &BaseServiceInfo{internalPolicyLocal: true},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: true, IsLocal: true},
+			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: true, IsLocal: false},
+		},
+		clusterEndpoints: nil,
+		localEndpoints:   sets.NewString("10.0.0.0:80"),
+	}, {
+		name:        "Cluster traffic policy, endpoints not Ready",
+		serviceInfo: &BaseServiceInfo{},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: false},
+			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: false},
+		},
+		clusterEndpoints: sets.NewString(),
+		localEndpoints:   nil,
+	}, {
+		name:        "Cluster traffic policy, some endpoints are Ready",
+		serviceInfo: &BaseServiceInfo{},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: false},
+			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: true},
+		},
+		clusterEndpoints: sets.NewString("10.0.0.1:80"),
+		localEndpoints:   nil,
+	}, {
+		name:        "Cluster traffic policy, PTE enabled, all endpoints are terminating",
+		pteEnabled:  true,
+		serviceInfo: &BaseServiceInfo{},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: false, Serving: true, Terminating: true, IsLocal: true},
+			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: false, Serving: true, Terminating: true, IsLocal: false},
+		},
+		clusterEndpoints: sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
+		localEndpoints:   nil,
+	}, {
+		name:        "Cluster traffic policy, PTE disabled, all endpoints are terminating",
+		pteEnabled:  false,
+		serviceInfo: &BaseServiceInfo{},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: false, Serving: true, Terminating: true, IsLocal: true},
+			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: false, Serving: true, Terminating: true, IsLocal: false},
+		},
+		clusterEndpoints: sets.NewString(),
+		localEndpoints:   nil,
+	}, {
+		name:        "iTP: Local, eTP: Cluster, some endpoints local",
+		serviceInfo: &BaseServiceInfo{internalPolicyLocal: true, externalPolicyLocal: false, nodePort: 8080},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: true, IsLocal: true},
+			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: true, IsLocal: false},
+		},
+		clusterEndpoints: sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
+		localEndpoints:   sets.NewString("10.0.0.0:80"),
+		allEndpoints:     sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
+	}, {
+		name:        "iTP: Cluster, eTP: Local, some endpoints local",
+		serviceInfo: &BaseServiceInfo{internalPolicyLocal: false, externalPolicyLocal: true, nodePort: 8080},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: true, IsLocal: true},
+			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: true, IsLocal: false},
+		},
+		clusterEndpoints: sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
+		localEndpoints:   sets.NewString("10.0.0.0:80"),
+		allEndpoints:     sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
+	}, {
+		name:        "iTP: Local, eTP: Local, some endpoints local",
+		serviceInfo: &BaseServiceInfo{internalPolicyLocal: true, externalPolicyLocal: true, nodePort: 8080},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: true, IsLocal: true},
+			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: true, IsLocal: false},
+		},
+		clusterEndpoints: sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
+		localEndpoints:   sets.NewString("10.0.0.0:80"),
+		allEndpoints:     sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
+	}, {
+		name:        "iTP: Local, eTP: Local, all endpoints remote",
+		serviceInfo: &BaseServiceInfo{internalPolicyLocal: true, externalPolicyLocal: true, nodePort: 8080},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: true, IsLocal: false},
+			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: true, IsLocal: false},
+		},
+		clusterEndpoints: sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
+		localEndpoints:   sets.NewString(),
+		allEndpoints:     sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
+	}, {
+		name:        "iTP: Local, eTP: Local, PTE disabled, all endpoints remote and terminating",
+		serviceInfo: &BaseServiceInfo{internalPolicyLocal: true, externalPolicyLocal: true, nodePort: 8080},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: false, Serving: true, Terminating: true, IsLocal: false},
+			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: false, Serving: true, Terminating: true, IsLocal: false},
+		},
+		clusterEndpoints: sets.NewString(),
+		localEndpoints:   sets.NewString(),
+		allEndpoints:     sets.NewString(),
+	}, {
+		name:        "iTP: Local, eTP: Local, PTE enabled, all endpoints remote and terminating",
+		pteEnabled:  true,
+		serviceInfo: &BaseServiceInfo{internalPolicyLocal: true, externalPolicyLocal: true, nodePort: 8080},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: false, Serving: true, Terminating: true, IsLocal: false},
+			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: false, Serving: true, Terminating: true, IsLocal: false},
+		},
+		clusterEndpoints:    sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
+		localEndpoints:      sets.NewString(),
+		allEndpoints:        sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
+		onlyRemoteEndpoints: true,
+	}, {
+		name:        "iTP: Cluster, eTP: Local, PTE disabled, with terminating endpoints",
+		serviceInfo: &BaseServiceInfo{internalPolicyLocal: false, externalPolicyLocal: true, nodePort: 8080},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: true, IsLocal: false},
+			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: false, Serving: false, IsLocal: true},
+			&BaseEndpointInfo{Endpoint: "10.0.0.2:80", Ready: false, Serving: true, Terminating: true, IsLocal: true},
+			&BaseEndpointInfo{Endpoint: "10.0.0.3:80", Ready: false, Serving: true, Terminating: true, IsLocal: false},
+		},
+		clusterEndpoints: sets.NewString("10.0.0.0:80"),
+		localEndpoints:   sets.NewString(),
+		allEndpoints:     sets.NewString("10.0.0.0:80"),
+	}, {
+		name:        "iTP: Cluster, eTP: Local, PTE enabled, with terminating endpoints",
+		pteEnabled:  true,
+		serviceInfo: &BaseServiceInfo{internalPolicyLocal: false, externalPolicyLocal: true, nodePort: 8080},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: true, IsLocal: false},
+			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: false, Serving: false, IsLocal: true},
+			&BaseEndpointInfo{Endpoint: "10.0.0.2:80", Ready: false, Serving: true, Terminating: true, IsLocal: true},
+			&BaseEndpointInfo{Endpoint: "10.0.0.3:80", Ready: false, Serving: true, Terminating: true, IsLocal: false},
+		},
+		clusterEndpoints: sets.NewString("10.0.0.0:80"),
+		localEndpoints:   sets.NewString("10.0.0.2:80"),
+		allEndpoints:     sets.NewString("10.0.0.0:80", "10.0.0.2:80"),
+	}, {
+		name:        "externalTrafficPolicy ignored if not externally accessible",
+		serviceInfo: &BaseServiceInfo{externalPolicyLocal: true},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: true, IsLocal: false},
+			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: true, IsLocal: true},
+		},
+		clusterEndpoints: sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
+		localEndpoints:   nil,
+		allEndpoints:     sets.NewString("10.0.0.0:80", "10.0.0.1:80"),
+	}, {
+		name:        "no cluster endpoints for iTP:Local internal-only service",
+		serviceInfo: &BaseServiceInfo{internalPolicyLocal: true},
+		endpoints: []Endpoint{
+			&BaseEndpointInfo{Endpoint: "10.0.0.0:80", Ready: true, IsLocal: false},
+			&BaseEndpointInfo{Endpoint: "10.0.0.1:80", Ready: true, IsLocal: true},
+		},
+		clusterEndpoints: nil,
+		localEndpoints:   sets.NewString("10.0.0.1:80"),
+		allEndpoints:     sets.NewString("10.0.0.1:80"),
+	}}
+
 	for _, tc := range testCases {
-		t.Run(tc.Name, func(t *testing.T) {
-			m := make(map[Endpoint]endpoint)
-			endpoints := []Endpoint{}
-			for _, ep := range tc.endpoints {
-				var e Endpoint = &BaseEndpointInfo{Endpoint: ep.Endpoint, Topology: tc.nodeLabels[ep.NodeName]}
-				m[e] = ep
-				endpoints = append(endpoints, e)
+		t.Run(tc.name, func(t *testing.T) {
+			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.TopologyAwareHints, tc.hintsEnabled)()
+			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.ProxyTerminatingEndpoints, tc.pteEnabled)()
+
+			clusterEndpoints, localEndpoints, allEndpoints, hasAnyEndpoints := CategorizeEndpoints(tc.endpoints, tc.serviceInfo, tc.nodeLabels)
+
+			if tc.clusterEndpoints == nil && clusterEndpoints != nil {
+				t.Errorf("expected no cluster endpoints but got %v", clusterEndpoints)
+			} else {
+				err := checkExpectedEndpoints(tc.clusterEndpoints, clusterEndpoints)
+				if err != nil {
+					t.Errorf("error with cluster endpoints: %v", err)
+				}
 			}
-			currentNodeLabels := tc.nodeLabels[tc.currentNodeName]
-			filteredEndpoint := []endpoint{}
-			for _, ep := range FilterTopologyEndpoint(currentNodeLabels, tc.topologyKeys, endpoints) {
-				filteredEndpoint = append(filteredEndpoint, m[ep])
+
+			if tc.localEndpoints == nil && localEndpoints != nil {
+				t.Errorf("expected no local endpoints but got %v", localEndpoints)
+			} else {
+				err := checkExpectedEndpoints(tc.localEndpoints, localEndpoints)
+				if err != nil {
+					t.Errorf("error with local endpoints: %v", err)
+				}
 			}
-			if !reflect.DeepEqual(filteredEndpoint, tc.expected) {
-				t.Errorf("expected %v, got %v", endpointsToStringArray(tc.expected), endpointsToStringArray(filteredEndpoint))
+
+			var expectedAllEndpoints sets.String
+			if tc.clusterEndpoints != nil && tc.localEndpoints == nil {
+				expectedAllEndpoints = tc.clusterEndpoints
+			} else if tc.localEndpoints != nil && tc.clusterEndpoints == nil {
+				expectedAllEndpoints = tc.localEndpoints
+			} else {
+				expectedAllEndpoints = tc.allEndpoints
+			}
+			err := checkExpectedEndpoints(expectedAllEndpoints, allEndpoints)
+			if err != nil {
+				t.Errorf("error with allEndpoints: %v", err)
+			}
+
+			expectedHasAnyEndpoints := len(expectedAllEndpoints) > 0 || tc.onlyRemoteEndpoints
+			if expectedHasAnyEndpoints != hasAnyEndpoints {
+				t.Errorf("expected hasAnyEndpoints=%v, got %v", expectedHasAnyEndpoints, hasAnyEndpoints)
 			}
 		})
 	}

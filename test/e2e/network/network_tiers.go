@@ -32,13 +32,16 @@ import (
 	"k8s.io/kubernetes/test/e2e/framework/providers/gce"
 	e2eservice "k8s.io/kubernetes/test/e2e/framework/service"
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
+	"k8s.io/kubernetes/test/e2e/network/common"
 	gcecloud "k8s.io/legacy-cloud-providers/gce"
+	admissionapi "k8s.io/pod-security-admission/api"
 
 	"github.com/onsi/ginkgo"
 )
 
-var _ = SIGDescribe("Services [Slow]", func() {
+var _ = common.SIGDescribe("Services GCE [Slow]", func() {
 	f := framework.NewDefaultFramework("services")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 
 	var cs clientset.Interface
 	serviceLBNames := []string{}
@@ -92,7 +95,7 @@ var _ = SIGDescribe("Services [Slow]", func() {
 		// Test 2: re-create a LB of a different tier for the updated Service.
 		ginkgo.By("updating the Service to use the premium (default) tier")
 		svc, err = jig.UpdateService(func(svc *v1.Service) {
-			clearNetworkTier(svc)
+			setNetworkTier(svc, string(gcecloud.NetworkTierAnnotationPremium))
 		})
 		framework.ExpectNoError(err)
 		// Verify that service has been updated properly.
@@ -209,14 +212,6 @@ func setNetworkTier(svc *v1.Service, tier string) {
 		svc.ObjectMeta.Annotations = map[string]string{}
 	}
 	svc.ObjectMeta.Annotations[key] = tier
-}
-
-func clearNetworkTier(svc *v1.Service) {
-	key := gcecloud.NetworkTierAnnotationKey
-	if svc.ObjectMeta.Annotations == nil {
-		return
-	}
-	delete(svc.ObjectMeta.Annotations, key)
 }
 
 // TODO: add retries if this turns out to be flaky.

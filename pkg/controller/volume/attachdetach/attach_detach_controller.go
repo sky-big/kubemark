@@ -138,8 +138,7 @@ func NewAttachDetachController(
 		filteredDialOptions: filteredDialOptions,
 	}
 
-	if utilfeature.DefaultFeatureGate.Enabled(features.CSIMigration) &&
-		utilfeature.DefaultFeatureGate.Enabled(features.CSINodeInfo) {
+	if utilfeature.DefaultFeatureGate.Enabled(features.CSIMigration) {
 		adc.csiNodeLister = csiNodeInformer.Lister()
 		adc.csiNodeSynced = csiNodeInformer.Informer().HasSynced
 	}
@@ -151,7 +150,7 @@ func NewAttachDetachController(
 	adc.volumeAttachmentSynced = volumeAttachmentInformer.Informer().HasSynced
 
 	if err := adc.volumePluginMgr.InitPlugins(plugins, prober, adc); err != nil {
-		return nil, fmt.Errorf("Could not initialize volume plugins for Attach/Detach Controller: %+v", err)
+		return nil, fmt.Errorf("could not initialize volume plugins for Attach/Detach Controller: %w", err)
 	}
 
 	eventBroadcaster := record.NewBroadcaster()
@@ -167,7 +166,6 @@ func NewAttachDetachController(
 			kubeClient,
 			&adc.volumePluginMgr,
 			recorder,
-			false, // flag for experimental binary check for volume mount
 			blkutil))
 	adc.nodeStatusUpdater = statusupdater.NewNodeStatusUpdater(
 		kubeClient, nodeInformer.Lister(), adc.actualStateOfWorld)
@@ -182,11 +180,12 @@ func NewAttachDetachController(
 		adc.actualStateOfWorld,
 		adc.attacherDetacher,
 		adc.nodeStatusUpdater,
+		adc.nodeLister,
 		recorder)
 
 	csiTranslator := csitrans.New()
 	adc.intreeToCSITranslator = csiTranslator
-	adc.csiMigratedPluginManager = csimigration.NewPluginManager(csiTranslator)
+	adc.csiMigratedPluginManager = csimigration.NewPluginManager(csiTranslator, utilfeature.DefaultFeatureGate)
 
 	adc.desiredStateOfWorldPopulator = populator.NewDesiredStateOfWorldPopulator(
 		timerConfig.DesiredStateOfWorldPopulatorLoopSleepPeriod,
@@ -208,7 +207,7 @@ func NewAttachDetachController(
 	// This custom indexer will index pods by its PVC keys. Then we don't need
 	// to iterate all pods every time to find pods which reference given PVC.
 	if err := common.AddPodPVCIndexerIfNotPresent(adc.podIndexer); err != nil {
-		return nil, fmt.Errorf("Could not initialize attach detach controller: %v", err)
+		return nil, fmt.Errorf("could not initialize attach detach controller: %w", err)
 	}
 
 	nodeInformer.Informer().AddEventHandler(kcache.ResourceEventHandlerFuncs{
@@ -694,8 +693,9 @@ func (adc *attachDetachController) processVolumesInUse(
 // For each VA object, this function checks if its present in the ASW.
 // If not, adds the volume to ASW as an "uncertain" attachment.
 // In the reconciler, the logic checks if the volume is present in the DSW;
-//   if yes, the reconciler will attempt attach on the volume;
-//   if not (could be a dangling attachment), the reconciler will detach this volume.
+//
+//	if yes, the reconciler will attempt attach on the volume;
+//	if not (could be a dangling attachment), the reconciler will detach this volume.
 func (adc *attachDetachController) processVolumeAttachments() error {
 	vas, err := adc.volumeAttachmentLister.List(labels.Everything())
 	if err != nil {
@@ -857,6 +857,10 @@ func (adc *attachDetachController) GetHostIP() (net.IP, error) {
 
 func (adc *attachDetachController) GetNodeAllocatable() (v1.ResourceList, error) {
 	return v1.ResourceList{}, nil
+}
+
+func (adc *attachDetachController) GetAttachedVolumesFromNodeStatus() (map[v1.UniqueVolumeName]string, error) {
+	return map[v1.UniqueVolumeName]string{}, nil
 }
 
 func (adc *attachDetachController) GetSecretFunc() func(namespace, name string) (*v1.Secret, error) {

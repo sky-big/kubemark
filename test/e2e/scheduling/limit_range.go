@@ -36,6 +36,7 @@ import (
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2eservice "k8s.io/kubernetes/test/e2e/framework/service"
 	imageutils "k8s.io/kubernetes/test/utils/image"
+	admissionapi "k8s.io/pod-security-admission/api"
 
 	"github.com/onsi/ginkgo"
 )
@@ -46,6 +47,7 @@ const (
 
 var _ = SIGDescribe("LimitRange", func() {
 	f := framework.NewDefaultFramework("limitrange")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelBaseline
 
 	/*
 		Release: v1.18
@@ -72,10 +74,6 @@ var _ = SIGDescribe("LimitRange", func() {
 		limitRanges, err := f.ClientSet.CoreV1().LimitRanges(f.Namespace.Name).List(context.TODO(), options)
 		framework.ExpectNoError(err, "failed to query for limitRanges")
 		framework.ExpectEqual(len(limitRanges.Items), 0)
-		options = metav1.ListOptions{
-			LabelSelector:   selector.String(),
-			ResourceVersion: limitRanges.ListMeta.ResourceVersion,
-		}
 
 		listCompleted := make(chan bool, 1)
 		lw := &cache.ListWatch{

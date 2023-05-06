@@ -58,7 +58,7 @@ type ReconcileOptions struct {
 
 var (
 	reconcileLong = templates.LongDesc(`
-		Reconciles rules for RBAC Role, RoleBinding, ClusterRole, and ClusterRole binding objects.
+		Reconciles rules for RBAC role, role binding, cluster role, and cluster role binding objects.
 
 		Missing objects are created, and the containing namespace is created for namespaced objects, if required.
 
@@ -71,7 +71,7 @@ var (
 		This is preferred to 'apply' for RBAC resources so that semantically-aware merging of rules and subjects is done.`)
 
 	reconcileExample = templates.Examples(`
-		# Reconcile rbac resources from a file
+		# Reconcile RBAC resources from a file
 		kubectl auth reconcile -f my-rbac-rules.yaml`)
 )
 
@@ -91,7 +91,7 @@ func NewCmdReconcile(f cmdutil.Factory, streams genericclioptions.IOStreams) *co
 	cmd := &cobra.Command{
 		Use:                   "reconcile -f FILENAME",
 		DisableFlagsInUseLine: true,
-		Short:                 "Reconciles rules for RBAC Role, RoleBinding, ClusterRole, and ClusterRole binding objects",
+		Short:                 "Reconciles rules for RBAC role, role binding, cluster role, and cluster role binding objects",
 		Long:                  reconcileLong,
 		Example:               reconcileExample,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -121,7 +121,11 @@ func (o *ReconcileOptions) Complete(cmd *cobra.Command, f cmdutil.Factory, args 
 		return errors.New("no arguments are allowed")
 	}
 
-	o.DryRun = getClientSideDryRun(cmd)
+	dryRun, err := getClientSideDryRun(cmd)
+	if err != nil {
+		return err
+	}
+	o.DryRun = dryRun
 
 	namespace, enforceNamespace, err := f.ToRawKubeConfigLoader().Namespace()
 	if err != nil {
@@ -134,6 +138,7 @@ func (o *ReconcileOptions) Complete(cmd *cobra.Command, f cmdutil.Factory, args 
 		NamespaceParam(namespace).DefaultNamespace().
 		FilenameParam(enforceNamespace, o.FilenameOptions).
 		Flatten().
+		Local().
 		Do()
 
 	if err := r.Err(); err != nil {
@@ -331,13 +336,13 @@ func (o *ReconcileOptions) printResults(object runtime.Object,
 	}
 }
 
-func getClientSideDryRun(cmd *cobra.Command) bool {
+func getClientSideDryRun(cmd *cobra.Command) (bool, error) {
 	dryRunStrategy, err := cmdutil.GetDryRunStrategy(cmd)
 	if err != nil {
-		klog.Fatalf("error accessing --dry-run flag for command %s: %v", cmd.Name(), err)
+		return false, fmt.Errorf("error accessing --dry-run flag for command %s: %v", cmd.Name(), err)
 	}
 	if dryRunStrategy == cmdutil.DryRunServer {
-		klog.Fatalf("--dry-run=server for command %s is not supported yet", cmd.Name())
+		return false, fmt.Errorf("--dry-run=server for command %s is not supported yet", cmd.Name())
 	}
-	return dryRunStrategy == cmdutil.DryRunClient
+	return dryRunStrategy == cmdutil.DryRunClient, nil
 }

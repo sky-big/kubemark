@@ -25,7 +25,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
-	discovery "k8s.io/api/discovery/v1beta1"
+	discovery "k8s.io/api/discovery/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -40,8 +40,8 @@ import (
 )
 
 func TestEndpointSliceMirroring(t *testing.T) {
-	masterConfig := framework.NewIntegrationTestMasterConfig()
-	_, server, closeFn := framework.RunAMaster(masterConfig)
+	controlPlaneConfig := framework.NewIntegrationTestControlPlaneConfig()
+	_, server, closeFn := framework.RunAnAPIServer(controlPlaneConfig)
 	defer closeFn()
 
 	config := restclient.Config{Host: server.URL}
@@ -64,26 +64,26 @@ func TestEndpointSliceMirroring(t *testing.T) {
 		informers.Core().V1().Pods(),
 		informers.Core().V1().Services(),
 		informers.Core().V1().Nodes(),
-		informers.Discovery().V1beta1().EndpointSlices(),
+		informers.Discovery().V1().EndpointSlices(),
 		int32(100),
 		client,
 		1*time.Second)
 
 	epsmController := endpointslicemirroring.NewController(
 		informers.Core().V1().Endpoints(),
-		informers.Discovery().V1beta1().EndpointSlices(),
+		informers.Discovery().V1().EndpointSlices(),
 		informers.Core().V1().Services(),
 		int32(100),
 		client,
 		1*time.Second)
 
 	// Start informer and controllers
-	stopCh := make(chan struct{})
-	defer close(stopCh)
-	informers.Start(stopCh)
-	go epController.Run(5, stopCh)
-	go epsController.Run(5, stopCh)
-	go epsmController.Run(5, stopCh)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	informers.Start(ctx.Done())
+	go epController.Run(ctx, 5)
+	go epsController.Run(5, ctx.Done())
+	go epsmController.Run(5, ctx.Done())
 
 	testCases := []struct {
 		testName                     string
@@ -181,7 +181,7 @@ func TestEndpointSliceMirroring(t *testing.T) {
 			if tc.service != nil {
 				resourceName = tc.service.Name
 				tc.service.Namespace = ns.Name
-				_, err = client.CoreV1().Services(ns.Name).Create(context.TODO(), tc.service, metav1.CreateOptions{})
+				_, err = client.CoreV1().Services(ns.Name).Create(ctx, tc.service, metav1.CreateOptions{})
 				if err != nil {
 					t.Fatalf("Error creating service: %v", err)
 				}
@@ -190,7 +190,7 @@ func TestEndpointSliceMirroring(t *testing.T) {
 			if tc.customEndpoints != nil {
 				resourceName = tc.customEndpoints.Name
 				tc.customEndpoints.Namespace = ns.Name
-				_, err = client.CoreV1().Endpoints(ns.Name).Create(context.TODO(), tc.customEndpoints, metav1.CreateOptions{})
+				_, err = client.CoreV1().Endpoints(ns.Name).Create(ctx, tc.customEndpoints, metav1.CreateOptions{})
 				if err != nil {
 					t.Fatalf("Error creating endpoints: %v", err)
 				}
@@ -198,7 +198,7 @@ func TestEndpointSliceMirroring(t *testing.T) {
 
 			err = wait.PollImmediate(1*time.Second, wait.ForeverTestTimeout, func() (bool, error) {
 				lSelector := discovery.LabelServiceName + "=" + resourceName
-				esList, err := client.DiscoveryV1beta1().EndpointSlices(ns.Name).List(context.TODO(), metav1.ListOptions{LabelSelector: lSelector})
+				esList, err := client.DiscoveryV1().EndpointSlices(ns.Name).List(ctx, metav1.ListOptions{LabelSelector: lSelector})
 				if err != nil {
 					t.Logf("Error listing EndpointSlices: %v", err)
 					return false, err
@@ -234,8 +234,8 @@ func TestEndpointSliceMirroring(t *testing.T) {
 }
 
 func TestEndpointSliceMirroringUpdates(t *testing.T) {
-	masterConfig := framework.NewIntegrationTestMasterConfig()
-	_, server, closeFn := framework.RunAMaster(masterConfig)
+	controlPlaneConfig := framework.NewIntegrationTestControlPlaneConfig()
+	_, server, closeFn := framework.RunAnAPIServer(controlPlaneConfig)
 	defer closeFn()
 
 	config := restclient.Config{Host: server.URL}
@@ -249,17 +249,17 @@ func TestEndpointSliceMirroringUpdates(t *testing.T) {
 
 	epsmController := endpointslicemirroring.NewController(
 		informers.Core().V1().Endpoints(),
-		informers.Discovery().V1beta1().EndpointSlices(),
+		informers.Discovery().V1().EndpointSlices(),
 		informers.Core().V1().Services(),
 		int32(100),
 		client,
 		1*time.Second)
 
 	// Start informer and controllers
-	stopCh := make(chan struct{})
-	defer close(stopCh)
-	informers.Start(stopCh)
-	go epsmController.Run(1, stopCh)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	informers.Start(ctx.Done())
+	go epsmController.Run(1, ctx.Done())
 
 	testCases := []struct {
 		testName      string
@@ -326,19 +326,19 @@ func TestEndpointSliceMirroringUpdates(t *testing.T) {
 				}},
 			}
 
-			_, err = client.CoreV1().Services(ns.Name).Create(context.TODO(), service, metav1.CreateOptions{})
+			_, err = client.CoreV1().Services(ns.Name).Create(ctx, service, metav1.CreateOptions{})
 			if err != nil {
 				t.Fatalf("Error creating service: %v", err)
 			}
 
-			_, err = client.CoreV1().Endpoints(ns.Name).Create(context.TODO(), customEndpoints, metav1.CreateOptions{})
+			_, err = client.CoreV1().Endpoints(ns.Name).Create(ctx, customEndpoints, metav1.CreateOptions{})
 			if err != nil {
 				t.Fatalf("Error creating endpoints: %v", err)
 			}
 
 			// update endpoint
 			tc.tweakEndpoint(customEndpoints)
-			_, err = client.CoreV1().Endpoints(ns.Name).Update(context.TODO(), customEndpoints, metav1.UpdateOptions{})
+			_, err = client.CoreV1().Endpoints(ns.Name).Update(ctx, customEndpoints, metav1.UpdateOptions{})
 			if err != nil {
 				t.Fatalf("Error updating endpoints: %v", err)
 			}
@@ -346,7 +346,7 @@ func TestEndpointSliceMirroringUpdates(t *testing.T) {
 			// verify the endpoint updates were mirrored
 			err = wait.PollImmediate(1*time.Second, wait.ForeverTestTimeout, func() (bool, error) {
 				lSelector := discovery.LabelServiceName + "=" + service.Name
-				esList, err := client.DiscoveryV1beta1().EndpointSlices(ns.Name).List(context.TODO(), metav1.ListOptions{LabelSelector: lSelector})
+				esList, err := client.DiscoveryV1().EndpointSlices(ns.Name).List(ctx, metav1.ListOptions{LabelSelector: lSelector})
 				if err != nil {
 					t.Logf("Error listing EndpointSlices: %v", err)
 					return false, err
@@ -410,8 +410,8 @@ func TestEndpointSliceMirroringUpdates(t *testing.T) {
 }
 
 func TestEndpointSliceMirroringSelectorTransition(t *testing.T) {
-	masterConfig := framework.NewIntegrationTestMasterConfig()
-	_, server, closeFn := framework.RunAMaster(masterConfig)
+	controlPlaneConfig := framework.NewIntegrationTestControlPlaneConfig()
+	_, server, closeFn := framework.RunAnAPIServer(controlPlaneConfig)
 	defer closeFn()
 
 	config := restclient.Config{Host: server.URL}
@@ -425,7 +425,7 @@ func TestEndpointSliceMirroringSelectorTransition(t *testing.T) {
 
 	epsmController := endpointslicemirroring.NewController(
 		informers.Core().V1().Endpoints(),
-		informers.Discovery().V1beta1().EndpointSlices(),
+		informers.Discovery().V1().EndpointSlices(),
 		informers.Core().V1().Services(),
 		int32(100),
 		client,
@@ -502,7 +502,7 @@ func TestEndpointSliceMirroringSelectorTransition(t *testing.T) {
 				}},
 			}
 
-			svc, err := client.CoreV1().Services(ns.Name).Create(context.TODO(), service, metav1.CreateOptions{})
+			_, err = client.CoreV1().Services(ns.Name).Create(context.TODO(), service, metav1.CreateOptions{})
 			if err != nil {
 				t.Fatalf("Error creating service: %v", err)
 			}
@@ -518,8 +518,8 @@ func TestEndpointSliceMirroringSelectorTransition(t *testing.T) {
 				t.Fatalf("Timed out waiting for initial mirrored slices to match expectations: %v", err)
 			}
 
-			svc.Spec.Selector = tc.endingSelector
-			_, err = client.CoreV1().Services(ns.Name).Update(context.TODO(), svc, metav1.UpdateOptions{})
+			service.Spec.Selector = tc.endingSelector
+			_, err = client.CoreV1().Services(ns.Name).Update(context.TODO(), service, metav1.UpdateOptions{})
 			if err != nil {
 				t.Fatalf("Error updating service: %v", err)
 			}
@@ -538,7 +538,7 @@ func waitForMirroredSlices(t *testing.T, client *kubernetes.Clientset, nsName, s
 	return wait.PollImmediate(1*time.Second, wait.ForeverTestTimeout, func() (bool, error) {
 		lSelector := discovery.LabelServiceName + "=" + svcName
 		lSelector += "," + discovery.LabelManagedBy + "=endpointslicemirroring-controller.k8s.io"
-		esList, err := client.DiscoveryV1beta1().EndpointSlices(nsName).List(context.TODO(), metav1.ListOptions{LabelSelector: lSelector})
+		esList, err := client.DiscoveryV1().EndpointSlices(nsName).List(context.TODO(), metav1.ListOptions{LabelSelector: lSelector})
 		if err != nil {
 			t.Logf("Error listing EndpointSlices: %v", err)
 			return false, err

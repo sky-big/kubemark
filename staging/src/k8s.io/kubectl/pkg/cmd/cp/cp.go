@@ -33,6 +33,7 @@ import (
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/kubectl/pkg/cmd/exec"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
+	"k8s.io/kubectl/pkg/util/completion"
 	"k8s.io/kubectl/pkg/util/i18n"
 	"k8s.io/kubectl/pkg/util/templates"
 )
@@ -44,7 +45,7 @@ var (
 		# image.  If 'tar' is not present, 'kubectl cp' will fail.
 		#
 		# For advanced use cases, such as symlinks, wildcard expansion or
-		# file mode preservation consider using 'kubectl exec'.
+		# file mode preservation, consider using 'kubectl exec'.
 
 		# Copy /tmp/foo local file to /tmp/bar in a remote pod in namespace <some-namespace>
 		tar cf - /tmp/foo | kubectl exec -i -n <some-namespace> <some-pod> -- tar xf - -C /tmp/bar
@@ -70,6 +71,7 @@ type CopyOptions struct {
 	Container  string
 	Namespace  string
 	NoPreserve bool
+	MaxTries   int
 
 	ClientConfig      *restclient.Config
 	Clientset         kubernetes.Interface
@@ -92,17 +94,69 @@ func NewCmdCp(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cobra.C
 	cmd := &cobra.Command{
 		Use:                   "cp <file-spec-src> <file-spec-dest>",
 		DisableFlagsInUseLine: true,
-		Short:                 i18n.T("Copy files and directories to and from containers."),
+		Short:                 i18n.T("Copy files and directories to and from containers"),
 		Long:                  i18n.T("Copy files and directories to and from containers."),
 		Example:               cpExample,
+		ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+			var comps []string
+			if len(args) == 0 {
+				if strings.IndexAny(toComplete, "/.~") == 0 {
+					// Looks like a path, do nothing
+				} else if strings.Contains(toComplete, ":") {
+					// TODO: complete remote files in the pod
+				} else if idx := strings.Index(toComplete, "/"); idx > 0 {
+					// complete <namespace>/<pod>
+					namespace := toComplete[:idx]
+					template := "{{ range .items }}{{ .metadata.namespace }}/{{ .metadata.name }}: {{ end }}"
+					comps = completion.CompGetFromTemplate(&template, f, namespace, cmd, []string{"pod"}, toComplete)
+				} else {
+					// Complete namespaces followed by a /
+					for _, ns := range completion.CompGetResource(f, cmd, "namespace", toComplete) {
+						comps = append(comps, fmt.Sprintf("%s/", ns))
+					}
+					// Complete pod names followed by a :
+					for _, pod := range completion.CompGetResource(f, cmd, "pod", toComplete) {
+						comps = append(comps, fmt.Sprintf("%s:", pod))
+					}
+
+					// Finally, provide file completion if we need to.
+					// We only do this if:
+					// 1- There are other completions found (if there are no completions,
+					//    the shell will do file completion itself)
+					// 2- If there is some input from the user (or else we will end up
+					//    listing the entire content of the current directory which could
+					//    be too many choices for the user)
+					if len(comps) > 0 && len(toComplete) > 0 {
+						if files, err := ioutil.ReadDir("."); err == nil {
+							for _, file := range files {
+								filename := file.Name()
+								if strings.HasPrefix(filename, toComplete) {
+									if file.IsDir() {
+										filename = fmt.Sprintf("%s/", filename)
+									}
+									// We are completing a file prefix
+									comps = append(comps, filename)
+								}
+							}
+						}
+					} else if len(toComplete) == 0 {
+						// If the user didn't provide any input to complete,
+						// we provide a hint that a path can also be used
+						comps = append(comps, "./", "/")
+					}
+				}
+			}
+			return comps, cobra.ShellCompDirectiveNoSpace
+		},
 		Run: func(cmd *cobra.Command, args []string) {
 			cmdutil.CheckErr(o.Complete(f, cmd))
 			cmdutil.CheckErr(o.Validate(cmd, args))
 			cmdutil.CheckErr(o.Run(args))
 		},
 	}
-	cmd.Flags().StringVarP(&o.Container, "container", "c", o.Container, "Container name. If omitted, the first container in the pod will be chosen")
+	cmdutil.AddContainerVarFlags(cmd, &o.Container, o.Container)
 	cmd.Flags().BoolVarP(&o.NoPreserve, "no-preserve", "", false, "The copied file/directory's ownership and permissions will not be preserved in the container")
+	cmd.Flags().IntVarP(&o.MaxTries, "retries", "", 0, "Set number of retries to complete a copy operation from a container. Specify 0 to disable or any negative value for infinite retrying. The default is 0 (no retry).")
 
 	return cmd
 }
@@ -275,37 +329,75 @@ func (o *CopyOptions) copyToPod(src, dest fileSpec, options *exec.ExecOptions) e
 }
 
 func (o *CopyOptions) copyFromPod(src, dest fileSpec) error {
-	reader, outStream := io.Pipe()
-	options := &exec.ExecOptions{
-		StreamOptions: exec.StreamOptions{
-			IOStreams: genericclioptions.IOStreams{
-				In:     nil,
-				Out:    outStream,
-				ErrOut: o.Out,
-			},
-
-			Namespace: src.PodNamespace,
-			PodName:   src.PodName,
-		},
-
-		// TODO: Improve error messages by first testing if 'tar' is present in the container?
-		Command:  []string{"tar", "cf", "-", src.File.String()},
-		Executor: &exec.DefaultRemoteExecutor{},
-	}
-
-	go func() {
-		defer outStream.Close()
-		err := o.execute(options)
-		cmdutil.CheckErr(err)
-	}()
-
+	reader := newTarPipe(src, o)
 	srcFile := src.File.(remotePath)
 	destFile := dest.File.(localPath)
-
 	// remove extraneous path shortcuts - these could occur if a path contained extra "../"
 	// and attempted to navigate beyond "/" in a remote filesystem
 	prefix := stripPathShortcuts(srcFile.StripSlashes().Clean().String())
 	return o.untarAll(src.PodNamespace, src.PodName, prefix, srcFile, destFile, reader)
+}
+
+type TarPipe struct {
+	src       fileSpec
+	o         *CopyOptions
+	reader    *io.PipeReader
+	outStream *io.PipeWriter
+	bytesRead uint64
+	retries   int
+}
+
+func newTarPipe(src fileSpec, o *CopyOptions) *TarPipe {
+	t := new(TarPipe)
+	t.src = src
+	t.o = o
+	t.initReadFrom(0)
+	return t
+}
+
+func (t *TarPipe) initReadFrom(n uint64) {
+	t.reader, t.outStream = io.Pipe()
+	options := &exec.ExecOptions{
+		StreamOptions: exec.StreamOptions{
+			IOStreams: genericclioptions.IOStreams{
+				In:     nil,
+				Out:    t.outStream,
+				ErrOut: t.o.Out,
+			},
+
+			Namespace: t.src.PodNamespace,
+			PodName:   t.src.PodName,
+		},
+
+		// TODO: Improve error messages by first testing if 'tar' is present in the container?
+		Command:  []string{"tar", "cf", "-", t.src.File.String()},
+		Executor: &exec.DefaultRemoteExecutor{},
+	}
+	if t.o.MaxTries != 0 {
+		options.Command = []string{"sh", "-c", fmt.Sprintf("tar cf - %s | tail -c+%d", t.src.File, n)}
+	}
+
+	go func() {
+		defer t.outStream.Close()
+		cmdutil.CheckErr(t.o.execute(options))
+	}()
+}
+
+func (t *TarPipe) Read(p []byte) (n int, err error) {
+	n, err = t.reader.Read(p)
+	if err != nil {
+		if t.o.MaxTries < 0 || t.retries < t.o.MaxTries {
+			t.retries++
+			fmt.Printf("Resuming copy at %d bytes, retry %d/%d\n", t.bytesRead, t.retries, t.o.MaxTries)
+			t.initReadFrom(t.bytesRead + 1)
+			err = nil
+		} else {
+			fmt.Printf("Dropping out copy after %d retries\n", t.retries)
+		}
+	} else {
+		t.bytesRead += uint64(n)
+	}
+	return
 }
 
 func makeTar(src localPath, dest remotePath, writer io.Writer) error {

@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	utilexec "k8s.io/utils/exec"
 )
@@ -79,6 +80,13 @@ type Interface interface {
 // Compile-time check to ensure all Mounter implementations satisfy
 // the mount interface.
 var _ Interface = &Mounter{}
+
+type MounterForceUnmounter interface {
+	Interface
+	// UnmountWithForce unmounts given target but will retry unmounting with force option
+	// after given timeout.
+	UnmountWithForce(target string, umountTimeout time.Duration) error
+}
 
 // MountPoint represents a single line in /proc/mounts or /etc/fstab.
 type MountPoint struct { // nolint: golint
@@ -261,7 +269,8 @@ func IsNotMountPoint(mounter Interface, file string) (bool, error) {
 // MakeBindOpts detects whether a bind mount is being requested and makes the remount options to
 // use in case of bind mount, due to the fact that bind mount doesn't respect mount options.
 // The list equals:
-//   options - 'bind' + 'remount' (no duplicate)
+//
+//	options - 'bind' + 'remount' (no duplicate)
 func MakeBindOpts(options []string) (bool, []string, []string) {
 	bind, bindOpts, bindRemountOpts, _ := MakeBindOptsSensitive(options, nil /* sensitiveOptions */)
 	return bind, bindOpts, bindRemountOpts

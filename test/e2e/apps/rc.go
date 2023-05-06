@@ -41,12 +41,14 @@ import (
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	imageutils "k8s.io/kubernetes/test/utils/image"
+	admissionapi "k8s.io/pod-security-admission/api"
 
 	"github.com/onsi/ginkgo"
 )
 
 var _ = SIGDescribe("ReplicationController", func() {
 	f := framework.NewDefaultFramework("replication-controller")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelBaseline
 
 	var ns string
 	var dc dynamic.Interface
@@ -165,7 +167,7 @@ var _ = SIGDescribe("ReplicationController", func() {
 
 			ginkgo.By("waiting for available Replicas")
 			eventFound = false
-			ctx, cancel = context.WithTimeout(context.Background(), 120*time.Second)
+			ctx, cancel = context.WithTimeout(context.Background(), f.Timeouts.PodStart)
 			defer cancel()
 			_, err = watchUntilWithoutRetry(ctx, retryWatcher, func(watchEvent watch.Event) (bool, error) {
 				var rc *v1.ReplicationController
@@ -281,7 +283,7 @@ var _ = SIGDescribe("ReplicationController", func() {
 			framework.ExpectNoError(err, "Failed to patch ReplicationControllerScale")
 			ginkgo.By("waiting for RC to be modified")
 			eventFound = false
-			ctx, cancel = context.WithTimeout(context.Background(), 60*time.Second)
+			ctx, cancel = context.WithTimeout(context.Background(), f.Timeouts.PodStart)
 			defer cancel()
 			_, err = watchUntilWithoutRetry(ctx, retryWatcher, func(watchEvent watch.Event) (bool, error) {
 				if watchEvent.Type != watch.Modified {

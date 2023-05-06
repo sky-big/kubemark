@@ -1,3 +1,4 @@
+//go:build cgo && linux
 // +build cgo,linux
 
 /*
@@ -35,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/uuid"
 	clientset "k8s.io/client-go/kubernetes"
 	coreclientset "k8s.io/client-go/kubernetes/typed/core/v1"
+	admissionapi "k8s.io/pod-security-admission/api"
 
 	"k8s.io/kubernetes/pkg/kubelet/util"
 	"k8s.io/kubernetes/test/e2e/framework"
@@ -42,13 +44,14 @@ import (
 	testutils "k8s.io/kubernetes/test/utils"
 )
 
-var _ = framework.KubeDescribe("NodeProblemDetector [NodeFeature:NodeProblemDetector] [Serial]", func() {
+var _ = SIGDescribe("NodeProblemDetector [NodeFeature:NodeProblemDetector] [Serial]", func() {
 	const (
 		pollInterval   = 1 * time.Second
 		pollConsistent = 5 * time.Second
 		pollTimeout    = 1 * time.Minute
 	)
 	f := framework.NewDefaultFramework("node-problem-detector")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	var c clientset.Interface
 	var uid string
 	var ns, name, configName, eventNamespace string
@@ -68,7 +71,7 @@ var _ = framework.KubeDescribe("NodeProblemDetector [NodeFeature:NodeProblemDete
 	})
 
 	// Test system log monitor. We may add other tests if we have more problem daemons in the future.
-	framework.KubeDescribe("SystemLogMonitor", func() {
+	ginkgo.Describe("SystemLogMonitor", func() {
 		const (
 			// Use test condition to avoid changing the real node condition in use.
 			// TODO(random-liu): Now node condition could be arbitrary string, consider whether we need to

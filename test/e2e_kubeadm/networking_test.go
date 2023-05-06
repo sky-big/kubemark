@@ -18,12 +18,13 @@ package kubeadm
 
 import (
 	"context"
-	"net"
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
+	admissionapi "k8s.io/pod-security-admission/api"
+	netutils "k8s.io/utils/net"
 
 	"github.com/onsi/ginkgo"
 )
@@ -41,6 +42,7 @@ var _ = Describe("networking [setup-networking]", func() {
 
 	// Get an instance of the k8s test framework
 	f := framework.NewDefaultFramework("networking")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 
 	// Tests in this container are not expected to create new objects in the cluster
 	// so we are disabling the creation of a namespace in order to get a faster execution
@@ -122,7 +124,7 @@ var _ = Describe("networking [setup-networking]", func() {
 			})
 		})
 	})
-	ginkgo.Context("dual-stack [Feature:IPv6DualStack]", func() {
+	ginkgo.Context("dual-stack", func() {
 		ginkgo.Context("podSubnet", func() {
 			ginkgo.It("should be properly configured if specified in kubeadm-config", func() {
 				if !dualStack {
@@ -163,14 +165,14 @@ var _ = Describe("networking [setup-networking]", func() {
 
 // ipWithinSubnet returns true if an IP (targetIP) falls within the reference subnet (refIPNet)
 func ipWithinSubnet(refIPNet, targetIP string) bool {
-	_, rNet, _ := net.ParseCIDR(refIPNet)
-	tIP := net.ParseIP(targetIP)
+	_, rNet, _ := netutils.ParseCIDRSloppy(refIPNet)
+	tIP := netutils.ParseIPSloppy(targetIP)
 	return rNet.Contains(tIP)
 }
 
 // subnetWithinSubnet returns true if a subnet (targetNet) falls within the reference subnet (refIPNet)
 func subnetWithinSubnet(refIPNet, targetNet string) bool {
-	_, rNet, _ := net.ParseCIDR(refIPNet)
-	tNet, _, _ := net.ParseCIDR(targetNet)
+	_, rNet, _ := netutils.ParseCIDRSloppy(refIPNet)
+	tNet, _, _ := netutils.ParseCIDRSloppy(targetNet)
 	return rNet.Contains(tNet)
 }

@@ -26,7 +26,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/autoscaling"
 	"github.com/aws/aws-sdk-go/service/ec2"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
 	awscloud "k8s.io/legacy-cloud-providers/aws"
@@ -38,7 +38,7 @@ func init() {
 
 func newProvider() (framework.ProviderInterface, error) {
 	if framework.TestContext.CloudConfig.Zone == "" {
-		return nil, fmt.Errorf("gce-zone must be specified for AWS")
+		framework.Logf("Warning: gce-zone not specified! Some tests that use the AWS SDK may select the wrong region and fail.")
 	}
 	return &Provider{}, nil
 }
@@ -91,6 +91,14 @@ func (p *Provider) DeleteNode(node *v1.Node) error {
 	}
 	_, err = client.TerminateInstances(req)
 	return err
+}
+
+func (p *Provider) CreateShare() (string, string, string, error) {
+	return "", "", "", nil
+}
+
+func (p *Provider) DeleteShare(accountName, shareName string) error {
+	return nil
 }
 
 // CreatePD creates a persistent volume on the specified availability zone

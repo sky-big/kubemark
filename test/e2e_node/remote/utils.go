@@ -26,7 +26,7 @@ import (
 // utils.go contains functions used across test suites.
 
 const (
-	cniVersion       = "v0.8.7"
+	cniVersion       = "v0.9.1"
 	cniArch          = "amd64"
 	cniDirectory     = "cni/bin" // The CNI tarball places binaries under directory under "cni/bin".
 	cniConfDirectory = "cni/net.d"
@@ -47,6 +47,18 @@ const cniConfig = `{
   }
 }
 `
+
+const credentialProviderConfig = `kind: CredentialProviderConfig
+apiVersion: kubelet.config.k8s.io/v1beta1
+providers:
+  - name: gcp-credential-provider
+    apiVersion: credentialprovider.kubelet.k8s.io/v1beta1
+    matchImages:
+    - "gcr.io"
+    - "*.gcr.io"
+    - "container.cloud.google.com"
+    - "*.pkg.dev"
+    defaultCacheDuration: 1m`
 
 // Install the cni plugin and add basic bridge configuration to the
 // configuration directory.
@@ -76,9 +88,22 @@ func setupCNI(host, workspace string) error {
 	return nil
 }
 
+func configureCredentialProvider(host, workspace string) error {
+	klog.V(2).Infof("Configuring kubelet credential provider on %q", host)
+
+	cmd := getSSHCommand(" ; ",
+		fmt.Sprintf("echo %s > %s", quote(credentialProviderConfig), filepath.Join(workspace, "credential-provider.yaml")),
+	)
+	if output, err := SSH(host, "sh", "-c", cmd); err != nil {
+		return fmt.Errorf("failed to write credential provider configuration on %q: %v output: %q", host, err, output)
+	}
+
+	return nil
+}
+
 // configureFirewall configures iptable firewall rules.
 func configureFirewall(host string) error {
-	klog.V(2).Infof("Configure iptables HEYHO firewall rules on %q", host)
+	klog.V(2).Infof("Configure iptables firewall rules on %q", host)
 
 	// Since the goal is to enable connectivity without taking into account current rule,
 	// we can just prepend the accept rules directly without any check

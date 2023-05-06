@@ -19,14 +19,14 @@ package auth
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	coordination "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
-	policy "k8s.io/api/policy/v1beta1"
+	policy "k8s.io/api/policy/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -55,10 +55,7 @@ func TestNodeAuthorizer(t *testing.T) {
 	// Enable DynamicKubeletConfig feature so that Node.Spec.ConfigSource can be set
 	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.DynamicKubeletConfig, true)()
 
-	// Enable CSINodeInfo feature so that nodes can create CSINode objects.
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.CSINodeInfo, true)()
-
-	tokenFile, err := ioutil.TempFile("", "kubeconfig")
+	tokenFile, err := os.CreateTemp("", "kubeconfig")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,9 +305,9 @@ func TestNodeAuthorizer(t *testing.T) {
 	createNode2NormalPodEviction := func(client clientset.Interface) func() error {
 		return func() error {
 			zero := int64(0)
-			return client.PolicyV1beta1().Evictions("ns").Evict(context.TODO(), &policy.Eviction{
+			return client.PolicyV1().Evictions("ns").Evict(context.TODO(), &policy.Eviction{
 				TypeMeta: metav1.TypeMeta{
-					APIVersion: "policy/v1beta1",
+					APIVersion: "policy/v1",
 					Kind:       "Eviction",
 				},
 				ObjectMeta: metav1.ObjectMeta{
@@ -324,9 +321,9 @@ func TestNodeAuthorizer(t *testing.T) {
 	createNode2MirrorPodEviction := func(client clientset.Interface) func() error {
 		return func() error {
 			zero := int64(0)
-			return client.PolicyV1beta1().Evictions("ns").Evict(context.TODO(), &policy.Eviction{
+			return client.PolicyV1().Evictions("ns").Evict(context.TODO(), &policy.Eviction{
 				TypeMeta: metav1.TypeMeta{
-					APIVersion: "policy/v1beta1",
+					APIVersion: "policy/v1",
 					Kind:       "Eviction",
 				},
 				ObjectMeta: metav1.ObjectMeta{
@@ -570,13 +567,7 @@ func TestNodeAuthorizer(t *testing.T) {
 	// re-create a pod as an admin to add object references
 	expectAllowed(t, createNode2NormalPod(superuserClient))
 
-	// ExpandPersistentVolumes feature disabled
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.ExpandPersistentVolumes, false)()
-	expectForbidden(t, updatePVCCapacity(node1Client))
-	expectForbidden(t, updatePVCCapacity(node2Client))
-
 	// ExpandPersistentVolumes feature enabled
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.ExpandPersistentVolumes, true)()
 	expectForbidden(t, updatePVCCapacity(node1Client))
 	expectAllowed(t, updatePVCCapacity(node2Client))
 	expectForbidden(t, updatePVCPhase(node2Client))

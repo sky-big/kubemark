@@ -63,6 +63,7 @@ import (
 	testutils "k8s.io/kubernetes/test/utils"
 	imageutils "k8s.io/kubernetes/test/utils/image"
 	uexec "k8s.io/utils/exec"
+	netutils "k8s.io/utils/net"
 
 	// TODO: Remove the following imports (ref: https://github.com/kubernetes/kubernetes/issues/81245)
 	e2ekubectl "k8s.io/kubernetes/test/e2e/framework/kubectl"
@@ -72,8 +73,22 @@ import (
 )
 
 const (
+	// Minimal number of nodes for the cluster to be considered large.
+	largeClusterThreshold = 100
+
+	// TODO(justinsb): Avoid hardcoding this.
+	awsMasterIP = "172.20.0.9"
+
+	// AllContainers specifies that all containers be visited
+	// Copied from pkg/api/v1/pod to avoid pulling extra dependencies
+	AllContainers = InitContainers | Containers | EphemeralContainers
+)
+
+// DEPRECATED constants. Use the timeouts in framework.Framework instead.
+const (
 	// PodListTimeout is how long to wait for the pod to be listable.
 	PodListTimeout = time.Minute
+
 	// PodStartTimeout is how long to wait for the pod to be started.
 	PodStartTimeout = 5 * time.Minute
 
@@ -136,16 +151,6 @@ const (
 
 	// SnapshotDeleteTimeout is how long for snapshot to delete snapshotContent.
 	SnapshotDeleteTimeout = 5 * time.Minute
-
-	// Minimal number of nodes for the cluster to be considered large.
-	largeClusterThreshold = 100
-
-	// TODO(justinsb): Avoid hardcoding this.
-	awsMasterIP = "172.20.0.9"
-
-	// AllContainers specifies that all containers be visited
-	// Copied from pkg/api/v1/pod to avoid pulling extra dependencies
-	AllContainers = InitContainers | Containers | EphemeralContainers
 )
 
 var (
@@ -277,6 +282,32 @@ func WaitForNamespacesDeleted(c clientset.Interface, namespaces []string, timeou
 		})
 }
 
+func waitForConfigMapInNamespace(c clientset.Interface, ns, name string, timeout time.Duration) error {
+	fieldSelector := fields.OneTermEqualSelector("metadata.name", name).String()
+	lw := &cache.ListWatch{
+		ListFunc: func(options metav1.ListOptions) (object runtime.Object, e error) {
+			options.FieldSelector = fieldSelector
+			return c.CoreV1().ConfigMaps(ns).List(context.TODO(), options)
+		},
+		WatchFunc: func(options metav1.ListOptions) (i watch.Interface, e error) {
+			options.FieldSelector = fieldSelector
+			return c.CoreV1().ConfigMaps(ns).Watch(context.TODO(), options)
+		},
+	}
+	ctx, cancel := watchtools.ContextWithOptionalTimeout(context.Background(), timeout)
+	defer cancel()
+	_, err := watchtools.UntilWithSync(ctx, lw, &v1.ConfigMap{}, nil, func(event watch.Event) (bool, error) {
+		switch event.Type {
+		case watch.Deleted:
+			return false, apierrors.NewNotFound(schema.GroupResource{Resource: "configmaps"}, name)
+		case watch.Added, watch.Modified:
+			return true, nil
+		}
+		return false, nil
+	})
+	return err
+}
+
 func waitForServiceAccountInNamespace(c clientset.Interface, ns, serviceAccountName string, timeout time.Duration) error {
 	fieldSelector := fields.OneTermEqualSelector("metadata.name", serviceAccountName).String()
 	lw := &cache.ListWatch{
@@ -291,22 +322,16 @@ func waitForServiceAccountInNamespace(c clientset.Interface, ns, serviceAccountN
 	}
 	ctx, cancel := watchtools.ContextWithOptionalTimeout(context.Background(), timeout)
 	defer cancel()
-	_, err := watchtools.UntilWithSync(ctx, lw, &v1.ServiceAccount{}, nil, serviceAccountHasSecrets)
+	_, err := watchtools.UntilWithSync(ctx, lw, &v1.ServiceAccount{}, nil, func(event watch.Event) (bool, error) {
+		switch event.Type {
+		case watch.Deleted:
+			return false, apierrors.NewNotFound(schema.GroupResource{Resource: "serviceaccounts"}, serviceAccountName)
+		case watch.Added, watch.Modified:
+			return true, nil
+		}
+		return false, nil
+	})
 	return err
-}
-
-// serviceAccountHasSecrets returns true if the service account has at least one secret,
-// false if it does not, or an error.
-func serviceAccountHasSecrets(event watch.Event) (bool, error) {
-	switch event.Type {
-	case watch.Deleted:
-		return false, apierrors.NewNotFound(schema.GroupResource{Resource: "serviceaccounts"}, "")
-	}
-	switch t := event.Object.(type) {
-	case *v1.ServiceAccount:
-		return len(t.Secrets) > 0, nil
-	}
-	return false, nil
 }
 
 // WaitForDefaultServiceAccountInNamespace waits for the default service account to be provisioned
@@ -314,6 +339,13 @@ func serviceAccountHasSecrets(event watch.Event) (bool, error) {
 // as a result, pods are not able to be provisioned in a namespace until the service account is provisioned
 func WaitForDefaultServiceAccountInNamespace(c clientset.Interface, namespace string) error {
 	return waitForServiceAccountInNamespace(c, namespace, "default", ServiceAccountProvisionTimeout)
+}
+
+// WaitForKubeRootCAInNamespace waits for the configmap kube-root-ca.crt containing the service account
+// CA trust bundle to be provisioned in the specified namespace so that pods do not have to retry mounting
+// the config map (which creates noise that hides other issues in the Kubelet).
+func WaitForKubeRootCAInNamespace(c clientset.Interface, namespace string) error {
+	return waitForConfigMapInNamespace(c, namespace, "kube-root-ca.crt", ServiceAccountProvisionTimeout)
 }
 
 // CreateTestingNS should be used by every test, note that we append a common prefix to the provided test name.
@@ -407,7 +439,7 @@ func CheckTestingNSDeletedExcept(c clientset.Interface, skip string) error {
 	return fmt.Errorf("Waiting for terminating namespaces to be deleted timed out")
 }
 
-//WaitForServiceEndpointsNum waits until the amount of endpoints that implement service to expectNum.
+// WaitForServiceEndpointsNum waits until the amount of endpoints that implement service to expectNum.
 func WaitForServiceEndpointsNum(c clientset.Interface, namespace, serviceName string, expectNum int, interval, timeout time.Duration) error {
 	return wait.Poll(interval, timeout, func() (bool, error) {
 		Logf("Waiting for amount of service:%s endpoints to be %d", serviceName, expectNum)
@@ -818,7 +850,7 @@ func (f *Framework) MatchContainerOutput(
 	}()
 
 	// Wait for client pod to complete.
-	podErr := e2epod.WaitForPodSuccessInNamespace(f.ClientSet, createdPod.Name, ns)
+	podErr := e2epod.WaitForPodSuccessInNamespaceTimeout(f.ClientSet, createdPod.Name, ns, f.Timeouts.PodStart)
 
 	// Grab its logs.  Get host first.
 	podStatus, err := podClient.Get(context.TODO(), createdPod.Name, metav1.GetOptions{})
@@ -894,7 +926,7 @@ func DumpAllNamespaceInfo(c clientset.Interface, namespace string) {
 		return c.CoreV1().Events(ns).List(context.TODO(), opts)
 	}, namespace)
 
-	e2epod.DumpAllPodInfoForNamespace(c, namespace)
+	e2epod.DumpAllPodInfoForNamespace(c, namespace, TestContext.ReportDir)
 
 	// If cluster is large, then the following logs are basically useless, because:
 	// 1. it takes tens of minutes or hours to grab all of them
@@ -1018,10 +1050,13 @@ func getNodeEvents(c clientset.Interface, nodeName string) []v1.Event {
 }
 
 // WaitForAllNodesSchedulable waits up to timeout for all
-// (but TestContext.AllowedNotReadyNodes) to become scheduable.
+// (but TestContext.AllowedNotReadyNodes) to become schedulable.
 func WaitForAllNodesSchedulable(c clientset.Interface, timeout time.Duration) error {
-	Logf("Waiting up to %v for all (but %d) nodes to be schedulable", timeout, TestContext.AllowedNotReadyNodes)
+	if TestContext.AllowedNotReadyNodes == -1 {
+		return nil
+	}
 
+	Logf("Waiting up to %v for all (but %d) nodes to be schedulable", timeout, TestContext.AllowedNotReadyNodes)
 	return wait.PollImmediate(
 		30*time.Second,
 		timeout,
@@ -1114,11 +1149,16 @@ func RunHostCmdWithRetries(ns, name, cmd string, interval, timeout time.Duration
 	}
 }
 
-// AllNodesReady checks whether all registered nodes are ready.
+// AllNodesReady checks whether all registered nodes are ready. Setting -1 on
+// TestContext.AllowedNotReadyNodes will bypass the post test node readiness check.
 // TODO: we should change the AllNodesReady call in AfterEach to WaitForAllNodesHealthy,
 // and figure out how to do it in a configurable way, as we can't expect all setups to run
 // default test add-ons.
 func AllNodesReady(c clientset.Interface, timeout time.Duration) error {
+	if TestContext.AllowedNotReadyNodes == -1 {
+		return nil
+	}
+
 	Logf("Waiting up to %v for all (but %d) nodes to be ready", timeout, TestContext.AllowedNotReadyNodes)
 
 	var notReady []*v1.Node
@@ -1230,33 +1270,36 @@ func RunCmdEnv(env []string, command string, args ...string) (string, string, er
 	return stdout, stderr, nil
 }
 
-// getMasterAddresses returns the externalIP, internalIP and hostname fields of the master.
-// If any of these is unavailable, it is set to "".
-func getMasterAddresses(c clientset.Interface) (string, string, string) {
-	var externalIP, internalIP, hostname string
+// getControlPlaneAddresses returns the externalIP, internalIP and hostname fields of control plane nodes.
+// If any of these is unavailable, empty slices are returned.
+func getControlPlaneAddresses(c clientset.Interface) ([]string, []string, []string) {
+	var externalIPs, internalIPs, hostnames []string
 
-	// Populate the internal IP.
+	// Populate the internal IPs.
 	eps, err := c.CoreV1().Endpoints(metav1.NamespaceDefault).Get(context.TODO(), "kubernetes", metav1.GetOptions{})
 	if err != nil {
 		Failf("Failed to get kubernetes endpoints: %v", err)
 	}
-	if len(eps.Subsets) != 1 || len(eps.Subsets[0].Addresses) != 1 {
-		Failf("There are more than 1 endpoints for kubernetes service: %+v", eps)
+	for _, subset := range eps.Subsets {
+		for _, address := range subset.Addresses {
+			if address.IP != "" {
+				internalIPs = append(internalIPs, address.IP)
+			}
+		}
 	}
-	internalIP = eps.Subsets[0].Addresses[0].IP
 
 	// Populate the external IP/hostname.
 	hostURL, err := url.Parse(TestContext.Host)
 	if err != nil {
 		Failf("Failed to parse hostname: %v", err)
 	}
-	if net.ParseIP(hostURL.Host) != nil {
-		externalIP = hostURL.Host
+	if netutils.ParseIPSloppy(hostURL.Host) != nil {
+		externalIPs = append(externalIPs, hostURL.Host)
 	} else {
-		hostname = hostURL.Host
+		hostnames = append(hostnames, hostURL.Host)
 	}
 
-	return externalIP, internalIP, hostname
+	return externalIPs, internalIPs, hostnames
 }
 
 // GetControlPlaneAddresses returns all IP addresses on which the kubelet can reach the control plane.
@@ -1264,16 +1307,16 @@ func getMasterAddresses(c clientset.Interface) (string, string, string) {
 // e.g. internal IPs to be used (issue #56787), so that we can be
 // sure to block the control plane fully during tests.
 func GetControlPlaneAddresses(c clientset.Interface) []string {
-	externalIP, internalIP, _ := getMasterAddresses(c)
+	externalIPs, internalIPs, _ := getControlPlaneAddresses(c)
 
 	ips := sets.NewString()
 	switch TestContext.Provider {
 	case "gce", "gke":
-		if externalIP != "" {
-			ips.Insert(externalIP)
+		for _, ip := range externalIPs {
+			ips.Insert(ip)
 		}
-		if internalIP != "" {
-			ips.Insert(internalIP)
+		for _, ip := range internalIPs {
+			ips.Insert(ip)
 		}
 	case "aws":
 		ips.Insert(awsMasterIP)
@@ -1329,18 +1372,22 @@ func taintExists(taints []v1.Taint, taintToFind *v1.Taint) bool {
 
 // WatchEventSequenceVerifier ...
 // manages a watch for a given resource, ensures that events take place in a given order, retries the test on failure
-//   testContext         cancelation signal across API boundries, e.g: context.TODO()
-//   dc                  sets up a client to the API
-//   resourceType        specify the type of resource
-//   namespace           select a namespace
-//   resourceName        the name of the given resource
-//   listOptions         options used to find the resource, recommended to use listOptions.labelSelector
-//   expectedWatchEvents array of events which are expected to occur
-//   scenario            the test itself
-//   retryCleanup        a function to run which ensures that there are no dangling resources upon test failure
+//
+//	testContext         cancelation signal across API boundries, e.g: context.TODO()
+//	dc                  sets up a client to the API
+//	resourceType        specify the type of resource
+//	namespace           select a namespace
+//	resourceName        the name of the given resource
+//	listOptions         options used to find the resource, recommended to use listOptions.labelSelector
+//	expectedWatchEvents array of events which are expected to occur
+//	scenario            the test itself
+//	retryCleanup        a function to run which ensures that there are no dangling resources upon test failure
+//
 // this tooling relies on the test to return the events as they occur
 // the entire scenario must be run to ensure that the desired watch events arrive in order (allowing for interweaving of watch events)
-//   if an expected watch event is missing we elect to clean up and run the entire scenario again
+//
+//	if an expected watch event is missing we elect to clean up and run the entire scenario again
+//
 // we try the scenario three times to allow the sequencing to fail a couple of times
 func WatchEventSequenceVerifier(ctx context.Context, dc dynamic.Interface, resourceType schema.GroupVersionResource, namespace string, resourceName string, listOptions metav1.ListOptions, expectedWatchEvents []watch.Event, scenario func(*watchtools.RetryWatcher) []watch.Event, retryCleanup func() error) {
 	listWatcher := &cache.ListWatch{
@@ -1361,7 +1408,7 @@ retriesLoop:
 		// NOTE the test may need access to the events to see what's going on, such as a change in status
 		actualWatchEvents := scenario(resourceWatch)
 		errs := sets.NewString()
-		ExpectEqual(len(expectedWatchEvents) <= len(actualWatchEvents), true, "Error: actual watch events amount (%d) must be greater than or equal to expected watch events amount (%d)", len(actualWatchEvents), len(expectedWatchEvents))
+		gomega.Expect(len(expectedWatchEvents)).To(gomega.BeNumerically("<=", len(actualWatchEvents)), "Did not get enough watch events")
 
 		totalValidWatchEvents := 0
 		foundEventIndexes := map[int]*int{}
@@ -1390,7 +1437,9 @@ retriesLoop:
 			fmt.Println("invariants violated:\n", strings.Join(errs.List(), "\n - "))
 			continue retriesLoop
 		}
-		ExpectEqual(errs.Len() > 0, false, strings.Join(errs.List(), "\n - "))
+		if errs.Len() > 0 {
+			Failf("Unexpected error(s): %v", strings.Join(errs.List(), "\n - "))
+		}
 		ExpectEqual(totalValidWatchEvents, len(expectedWatchEvents), "Error: there must be an equal amount of total valid watch events (%d) and expected watch events (%d)", totalValidWatchEvents, len(expectedWatchEvents))
 		break retriesLoop
 	}

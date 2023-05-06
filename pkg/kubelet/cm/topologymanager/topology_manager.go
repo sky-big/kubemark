@@ -36,7 +36,20 @@ const (
 	// present on a machine and the TopologyManager is enabled, an error will
 	// be returned and the TopologyManager will not be loaded.
 	maxAllowableNUMANodes = 8
+	// ErrorTopologyAffinity represents the type for a TopologyAffinityError
+	ErrorTopologyAffinity = "TopologyAffinityError"
 )
+
+// TopologyAffinityError represents an resource alignment error
+type TopologyAffinityError struct{}
+
+func (e TopologyAffinityError) Error() string {
+	return "Resources cannot be allocated with Topology locality"
+}
+
+func (e TopologyAffinityError) Type() string {
+	return ErrorTopologyAffinity
+}
 
 // Manager interface provides methods for Kubelet to manage pod topology hints
 type Manager interface {
@@ -79,7 +92,7 @@ type HintProvider interface {
 	Allocate(pod *v1.Pod, container *v1.Container) error
 }
 
-//Store interface is to allow Hint Providers to retrieve pod affinity
+// Store interface is to allow Hint Providers to retrieve pod affinity
 type Store interface {
 	GetAffinity(podUID string, containerName string) TopologyHint
 }
@@ -117,7 +130,7 @@ var _ Manager = &manager{}
 
 // NewManager creates a new TopologyManager based on provided policy and scope
 func NewManager(topology []cadvisorapi.Node, topologyPolicyName string, topologyScopeName string) (Manager, error) {
-	klog.Infof("[topologymanager] Creating topology manager with %s policy per %s scope", topologyPolicyName, topologyScopeName)
+	klog.InfoS("Creating topology manager with policy per scope", "topologyPolicyName", topologyPolicyName, "topologyScopeName", topologyScopeName)
 
 	var numaNodes []int
 	for _, node := range topology {
@@ -184,7 +197,7 @@ func (m *manager) RemoveContainer(containerID string) error {
 }
 
 func (m *manager) Admit(attrs *lifecycle.PodAdmitAttributes) lifecycle.PodAdmitResult {
-	klog.Infof("[topologymanager] Topology Admit Handler")
+	klog.InfoS("Topology Admit Handler")
 	pod := attrs.Pod
 
 	return m.scope.Admit(pod)

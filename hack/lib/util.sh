@@ -211,6 +211,7 @@ kube::util::find-binary-for-platform() {
     "${KUBE_ROOT}/_output/local/bin/${platform}/${lookfor}"
     "${KUBE_ROOT}/platforms/${platform}/${lookfor}"
   )
+
   # if we're looking for the host platform, add local non-platform-qualified search paths
   if [[ "${platform}" = "$(kube::util::host_platform)" ]]; then
     locations+=(
@@ -219,14 +220,10 @@ kube::util::find-binary-for-platform() {
     );
   fi
 
-  # Also search for binary in bazel build tree if bazel-out/ exists.
-  if [[ -d "${KUBE_ROOT}/bazel-out" ]]; then
-    while IFS=$'\n' read -r bin_build_mode; do
-      if grep -q "${platform}" "${bin_build_mode}"; then
-        # drop the extension to get the real binary path.
-        locations+=("${bin_build_mode%.*}")
-      fi
-    done < <(find "${KUBE_ROOT}/bazel-out/" -name "${lookfor}.go_build_mode")
+  # looks for $1 in the $PATH
+  if which "${lookfor}" >/dev/null; then
+    local -r local_bin="$(which "${lookfor}")"
+    locations+=( "${local_bin}"  );
   fi
 
   # List most recently-updated location.
@@ -617,11 +614,9 @@ Can't connect to 'docker' daemon.  please fix and retry.
 Possible causes:
   - Docker Daemon not started
     - Linux: confirm via your init system
-    - macOS w/ docker-machine: run `docker-machine ls` and `docker-machine start <name>`
     - macOS w/ Docker for Mac: Check the menu bar and start the Docker application
   - DOCKER_HOST hasn't been set or is set incorrectly
     - Linux: domain socket is used, DOCKER_* should be unset. In Bash run `unset ${!DOCKER_*}`
-    - macOS w/ docker-machine: run `eval "$(docker-machine env <name>)"`
     - macOS w/ Docker for Mac: domain socket is used, DOCKER_* should be unset. In Bash run `unset ${!DOCKER_*}`
   - Other things to check:
     - Linux: User isn't in 'docker' group.  Add and relogin.
@@ -693,12 +688,12 @@ function kube::util::ensure-cfssl {
     kernel=$(uname -s)
     case "${kernel}" in
       Linux)
-        curl --retry 10 -L -o cfssl https://pkg.cfssl.org/R1.2/cfssl_linux-amd64
-        curl --retry 10 -L -o cfssljson https://pkg.cfssl.org/R1.2/cfssljson_linux-amd64
+        curl --retry 10 -L -o cfssl https://github.com/cloudflare/cfssl/releases/download/v1.5.0/cfssl_1.5.0_linux_amd64
+        curl --retry 10 -L -o cfssljson https://github.com/cloudflare/cfssl/releases/download/v1.5.0/cfssljson_1.5.0_linux_amd64
         ;;
       Darwin)
-        curl --retry 10 -L -o cfssl https://pkg.cfssl.org/R1.2/cfssl_darwin-amd64
-        curl --retry 10 -L -o cfssljson https://pkg.cfssl.org/R1.2/cfssljson_darwin-amd64
+        curl --retry 10 -L -o cfssl https://github.com/cloudflare/cfssl/releases/download/v1.5.0/cfssl_1.5.0_darwin_amd64
+        curl --retry 10 -L -o cfssljson https://github.com/cloudflare/cfssl/releases/download/v1.5.0/cfssljson_1.5.0_darwin_amd64
         ;;
       *)
         echo "Unknown, unsupported platform: ${kernel}." >&2
@@ -719,14 +714,28 @@ function kube::util::ensure-cfssl {
   popd > /dev/null || return 1
 }
 
-# kube::util::ensure_dockerized
-# Confirms that the script is being run inside a kube-build image
+# kube::util::ensure-docker-buildx
+# Check if we have "docker buildx" commands available
 #
-function kube::util::ensure_dockerized {
-  if [[ -f /kube-build-image ]]; then
+function kube::util::ensure-docker-buildx {
+  if docker buildx --help >/dev/null 2>&1; then
     return 0
   else
-    echo "ERROR: This script is designed to be run inside a kube-build container"
+    echo "ERROR: docker buildx not available. Docker 19.03 or higher is required with experimental features enabled"
+    exit 1
+  fi
+}
+
+# kube::util::ensure-bash-version
+# Check if we are using a supported bash version
+#
+function kube::util::ensure-bash-version {
+  # shellcheck disable=SC2004
+  if ((${BASH_VERSINFO[0]}<4)) || ( ((${BASH_VERSINFO[0]}==4)) && ((${BASH_VERSINFO[1]}<2)) ); then
+    echo "ERROR: This script requires a minimum bash version of 4.2, but got version of ${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"
+    if [ "$(uname)" = 'Darwin' ]; then
+      echo "On macOS with homebrew 'brew install bash' is sufficient."
+    fi
     exit 1
   fi
 }

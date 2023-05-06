@@ -25,12 +25,14 @@ import (
 	"sync"
 
 	"github.com/pkg/errors"
+
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/util/keyutil"
 	"k8s.io/klog/v2"
-	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
-	pkiutil "k8s.io/kubernetes/cmd/kubeadm/app/util/pkiutil"
 
+	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
+	pkiutil "k8s.io/kubernetes/cmd/kubeadm/app/util/pkiutil"
 )
 
 var (
@@ -229,8 +231,14 @@ func writeCertificateFilesIfNotExist(pkiDir string, baseName string, signingCert
 
 	// Checks if the signed certificate exists in the PKI directory
 	if pkiutil.CertOrKeyExist(pkiDir, baseName) {
-		// Try to load signed certificate .crt and .key from the PKI directory
-		signedCert, _, err := pkiutil.TryLoadCertAndKeyFromDisk(pkiDir, baseName)
+		// Try to load key from the PKI directory
+		_, err := pkiutil.TryLoadKeyFromDisk(pkiDir, baseName)
+		if err != nil {
+			return errors.Wrapf(err, "failure loading %s key", baseName)
+		}
+
+		// Try to load certificate from the PKI directory
+		signedCert, intermediates, err := pkiutil.TryLoadCertChainFromDisk(pkiDir, baseName)
 		if err != nil {
 			return errors.Wrapf(err, "failure loading %s certificate", baseName)
 		}
@@ -238,7 +246,7 @@ func writeCertificateFilesIfNotExist(pkiDir string, baseName string, signingCert
 		CheckCertificatePeriodValidity(baseName, signedCert)
 
 		// Check if the existing cert is signed by the given CA
-		if err := signedCert.CheckSignatureFrom(signingCert); err != nil {
+		if err := pkiutil.VerifyCertChain(signedCert, intermediates, signingCert); err != nil {
 			return errors.Errorf("certificate %s is not signed by corresponding CA", baseName)
 		}
 
@@ -297,30 +305,32 @@ type certKeyLocation struct {
 	uxName     string
 }
 
-// SharedCertificateExists verifies if the shared certificates - the certificates that must be
-// equal across control-plane nodes: ca.key, ca.crt, sa.key, sa.pub + etcd/ca.key, etcd/ca.crt if local/stacked etcd
-// Missing keys are non-fatal and produce warnings.
+// SharedCertificateExists verifies if the shared certificates exist and are still valid - the certificates must be
+// equal across control-plane nodes: ca.key, ca.crt, sa.key, sa.pub, front-proxy-ca.key, front-proxy-ca.crt and etcd/ca.key, etcd/ca.crt if local/stacked etcd
+// Missing private keys of CA are non-fatal and produce warnings.
 func SharedCertificateExists(cfg *kubeadmapi.ClusterConfiguration) (bool, error) {
-
+	var errs []error
 	if err := validateCACertAndKey(certKeyLocation{cfg.CertificatesDir, kubeadmconstants.CACertAndKeyBaseName, "", "CA"}); err != nil {
-		return false, err
+		errs = append(errs, err)
 	}
 
 	if err := validatePrivatePublicKey(certKeyLocation{cfg.CertificatesDir, "", kubeadmconstants.ServiceAccountKeyBaseName, "service account"}); err != nil {
-		return false, err
+		errs = append(errs, err)
 	}
 
 	if err := validateCACertAndKey(certKeyLocation{cfg.CertificatesDir, kubeadmconstants.FrontProxyCACertAndKeyBaseName, "", "front-proxy CA"}); err != nil {
-		return false, err
+		errs = append(errs, err)
 	}
 
 	// in case of local/stacked etcd
 	if cfg.Etcd.External == nil {
 		if err := validateCACertAndKey(certKeyLocation{cfg.CertificatesDir, kubeadmconstants.EtcdCACertAndKeyBaseName, "", "etcd CA"}); err != nil {
-			return false, err
+			errs = append(errs, err)
 		}
 	}
-
+	if len(errs) != 0 {
+		return false, utilerrors.NewAggregate(errs)
+	}
 	return true, nil
 }
 
@@ -448,10 +458,17 @@ func validateSignedCert(l certKeyLocation) error {
 	return validateSignedCertWithCA(l, caCert)
 }
 
-// validateSignedCertWithCA tries to load a certificate and validate it with the given caCert
+// validateSignedCertWithCA tries to load a certificate and private key and
+// validates that the cert is signed by the given caCert
 func validateSignedCertWithCA(l certKeyLocation, caCert *x509.Certificate) error {
-	// Try to load key and signed certificate
-	signedCert, _, err := pkiutil.TryLoadCertAndKeyFromDisk(l.pkiDir, l.baseName)
+	// Try to load key from the PKI directory
+	_, err := pkiutil.TryLoadKeyFromDisk(l.pkiDir, l.baseName)
+	if err != nil {
+		return errors.Wrapf(err, "failure loading key for %s", l.baseName)
+	}
+
+	// Try to load certificate from the PKI directory
+	signedCert, intermediates, err := pkiutil.TryLoadCertChainFromDisk(l.pkiDir, l.baseName)
 	if err != nil {
 		return errors.Wrapf(err, "failure loading certificate for %s", l.uxName)
 	}
@@ -459,7 +476,7 @@ func validateSignedCertWithCA(l certKeyLocation, caCert *x509.Certificate) error
 	CheckCertificatePeriodValidity(l.uxName, signedCert)
 
 	// Check if the cert is signed by the CA
-	if err := signedCert.CheckSignatureFrom(caCert); err != nil {
+	if err := pkiutil.VerifyCertChain(signedCert, intermediates, caCert); err != nil {
 		return errors.Wrapf(err, "certificate %s is not signed by corresponding CA", l.uxName)
 	}
 	return nil
@@ -496,12 +513,11 @@ func validateCertificateWithConfig(cert *x509.Certificate, baseName string, cfg 
 // by keeping track with a cache.
 func CheckCertificatePeriodValidity(baseName string, cert *x509.Certificate) {
 	certPeriodValidationMutex.Lock()
+	defer certPeriodValidationMutex.Unlock()
 	if _, exists := certPeriodValidation[baseName]; exists {
-		certPeriodValidationMutex.Unlock()
 		return
 	}
 	certPeriodValidation[baseName] = struct{}{}
-	certPeriodValidationMutex.Unlock()
 
 	klog.V(5).Infof("validating certificate period for %s certificate", baseName)
 	if err := pkiutil.ValidateCertPeriod(cert, 0); err != nil {

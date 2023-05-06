@@ -1,3 +1,4 @@
+//go:build linux
 // +build linux
 
 /*
@@ -21,19 +22,23 @@ package e2enode
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kubeletconfig "k8s.io/kubernetes/pkg/kubelet/apis/config"
 	"k8s.io/kubernetes/pkg/kubelet/cm"
 	"k8s.io/kubernetes/pkg/kubelet/stats/pidlimit"
+	admissionapi "k8s.io/pod-security-admission/api"
+
 	"k8s.io/kubernetes/test/e2e/framework"
+	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
+	e2enodekubelet "k8s.io/kubernetes/test/e2e_node/kubeletconfig"
 
 	"github.com/onsi/ginkgo"
 	"github.com/onsi/gomega"
@@ -58,18 +63,18 @@ func setDesiredConfiguration(initialConfig *kubeletconfig.KubeletConfiguration) 
 	initialConfig.SystemReservedCgroup = systemReservedCgroup
 }
 
-var _ = framework.KubeDescribe("Node Container Manager [Serial]", func() {
+var _ = SIGDescribe("Node Container Manager [Serial]", func() {
 	f := framework.NewDefaultFramework("node-container-manager")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	ginkgo.Describe("Validate Node Allocatable [NodeFeature:NodeAllocatable]", func() {
 		ginkgo.It("sets up the node and runs the test", func() {
 			framework.ExpectNoError(runTest(f))
 		})
 	})
-
 })
 
 func expectFileValToEqual(filePath string, expectedValue, delta int64) error {
-	out, err := ioutil.ReadFile(filePath)
+	out, err := os.ReadFile(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to read file %q", filePath)
 	}
@@ -166,13 +171,39 @@ func runTest(f *framework.Framework) error {
 		return err
 	}
 
+	// Test needs to be updated to make it run properly on systemd.
+	// In its current state it will result in kubelet error since
+	// kubeReservedCgroup and systemReservedCgroup are not configured
+	// correctly for systemd.
+	// See: https://github.com/kubernetes/kubernetes/issues/102394
+	if oldCfg.CgroupDriver == "systemd" {
+		e2eskipper.Skipf("unable to run test when using systemd as cgroup driver")
+	}
+
 	// Create a cgroup manager object for manipulating cgroups.
 	cgroupManager := cm.NewCgroupManager(subsystems, oldCfg.CgroupDriver)
 
 	defer destroyTemporaryCgroupsForReservation(cgroupManager)
 	defer func() {
 		if oldCfg != nil {
-			framework.ExpectNoError(setKubeletConfiguration(f, oldCfg))
+			// Update the Kubelet configuration.
+			ginkgo.By("Stopping the kubelet")
+			startKubelet := stopKubelet()
+
+			// wait until the kubelet health check will fail
+			gomega.Eventually(func() bool {
+				return kubeletHealthCheck(kubeletHealthCheckURL)
+			}, time.Minute, time.Second).Should(gomega.BeFalse())
+
+			framework.ExpectNoError(e2enodekubelet.WriteKubeletConfigFile(oldCfg))
+
+			ginkgo.By("Starting the kubelet")
+			startKubelet()
+
+			// wait until the kubelet health check will succeed
+			gomega.Eventually(func() bool {
+				return kubeletHealthCheck(kubeletHealthCheckURL)
+			}, 2*time.Minute, 5*time.Second).Should(gomega.BeTrue())
 		}
 	}()
 	if err := createTemporaryCgroupsForReservation(cgroupManager); err != nil {
@@ -182,7 +213,25 @@ func runTest(f *framework.Framework) error {
 	// Change existing kubelet configuration
 	setDesiredConfiguration(newCfg)
 	// Set the new kubelet configuration.
-	err = setKubeletConfiguration(f, newCfg)
+	// Update the Kubelet configuration.
+	ginkgo.By("Stopping the kubelet")
+	startKubelet := stopKubelet()
+
+	// wait until the kubelet health check will fail
+	gomega.Eventually(func() bool {
+		return kubeletHealthCheck(kubeletHealthCheckURL)
+	}, time.Minute, time.Second).Should(gomega.BeFalse())
+
+	framework.ExpectNoError(e2enodekubelet.WriteKubeletConfigFile(newCfg))
+
+	ginkgo.By("Starting the kubelet")
+	startKubelet()
+
+	// wait until the kubelet health check will succeed
+	gomega.Eventually(func() bool {
+		return kubeletHealthCheck(kubeletHealthCheckURL)
+	}, 2*time.Minute, 5*time.Second).Should(gomega.BeTrue())
+
 	if err != nil {
 		return err
 	}

@@ -26,7 +26,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
-	discovery "k8s.io/api/discovery/v1beta1"
+	discovery "k8s.io/api/discovery/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -41,7 +42,9 @@ import (
 	"k8s.io/client-go/tools/cache"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/kubernetes/pkg/controller"
+	"k8s.io/kubernetes/pkg/controller/endpointslice/topologycache"
 	endpointutil "k8s.io/kubernetes/pkg/controller/util/endpoint"
+	endpointsliceutil "k8s.io/kubernetes/pkg/controller/util/endpointslice"
 	"k8s.io/kubernetes/pkg/features"
 	utilpointer "k8s.io/utils/pointer"
 )
@@ -69,7 +72,7 @@ func newController(nodeNames []string, batchPeriod time.Duration) (*fake.Clients
 		indexer.Add(&v1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}})
 	}
 
-	esInformer := informerFactory.Discovery().V1beta1().EndpointSlices()
+	esInformer := informerFactory.Discovery().V1().EndpointSlices()
 	esIndexer := esInformer.Informer().GetIndexer()
 
 	// These reactors are required to mock functionality that would be covered
@@ -110,7 +113,7 @@ func newController(nodeNames []string, batchPeriod time.Duration) (*fake.Clients
 
 	return client, &endpointSliceController{
 		esController,
-		informerFactory.Discovery().V1beta1().EndpointSlices().Informer().GetStore(),
+		informerFactory.Discovery().V1().EndpointSlices().Informer().GetStore(),
 		informerFactory.Core().V1().Nodes().Informer().GetStore(),
 		informerFactory.Core().V1().Pods().Informer().GetStore(),
 		informerFactory.Core().V1().Services().Informer().GetStore(),
@@ -161,7 +164,7 @@ func TestSyncServiceWithSelector(t *testing.T) {
 	standardSyncService(t, esController, ns, serviceName)
 	expectActions(t, client.Actions(), 1, "create", "endpointslices")
 
-	sliceList, err := client.DiscoveryV1beta1().EndpointSlices(ns).List(context.TODO(), metav1.ListOptions{})
+	sliceList, err := client.DiscoveryV1().EndpointSlices(ns).List(context.TODO(), metav1.ListOptions{})
 	assert.Nil(t, err, "Expected no error fetching endpoint slices")
 	assert.Len(t, sliceList.Items, 1, "Expected 1 endpoint slices")
 	slice := sliceList.Items[0]
@@ -228,14 +231,59 @@ func TestSyncServicePodSelection(t *testing.T) {
 	expectActions(t, client.Actions(), 1, "create", "endpointslices")
 
 	// an endpoint slice should be created, it should only reference pod1 (not pod2)
-	slices, err := client.DiscoveryV1beta1().EndpointSlices(ns).List(context.TODO(), metav1.ListOptions{})
+	slices, err := client.DiscoveryV1().EndpointSlices(ns).List(context.TODO(), metav1.ListOptions{})
 	assert.Nil(t, err, "Expected no error fetching endpoint slices")
 	assert.Len(t, slices.Items, 1, "Expected 1 endpoint slices")
 	slice := slices.Items[0]
 	assert.Len(t, slice.Endpoints, 1, "Expected 1 endpoint in first slice")
-	assert.NotEmpty(t, slice.Annotations["endpoints.kubernetes.io/last-change-trigger-time"])
+	assert.NotEmpty(t, slice.Annotations[v1.EndpointsLastChangeTriggerTime])
 	endpoint := slice.Endpoints[0]
 	assert.EqualValues(t, endpoint.TargetRef, &v1.ObjectReference{Kind: "Pod", Namespace: ns, Name: pod1.Name})
+}
+
+func TestSyncServiceEndpointSlicePendingDeletion(t *testing.T) {
+	client, esController := newController([]string{"node-1"}, time.Duration(0))
+	ns := metav1.NamespaceDefault
+	serviceName := "testing-1"
+	service := createService(t, esController, ns, serviceName)
+	err := esController.syncService(fmt.Sprintf("%s/%s", ns, serviceName))
+	assert.Nil(t, err, "Expected no error syncing service")
+
+	gvk := schema.GroupVersionKind{Version: "v1", Kind: "Service"}
+	ownerRef := metav1.NewControllerRef(service, gvk)
+
+	deletedTs := metav1.Now()
+	endpointSlice := &discovery.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "epSlice-1",
+			Namespace:       ns,
+			OwnerReferences: []metav1.OwnerReference{*ownerRef},
+			Labels: map[string]string{
+				discovery.LabelServiceName: serviceName,
+				discovery.LabelManagedBy:   controllerName,
+			},
+			DeletionTimestamp: &deletedTs,
+		},
+		AddressType: discovery.AddressTypeIPv4,
+	}
+	err = esController.endpointSliceStore.Add(endpointSlice)
+	if err != nil {
+		t.Fatalf("Expected no error adding EndpointSlice: %v", err)
+	}
+	_, err = client.DiscoveryV1().EndpointSlices(ns).Create(context.TODO(), endpointSlice, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("Expected no error creating EndpointSlice: %v", err)
+	}
+
+	numActionsBefore := len(client.Actions())
+	err = esController.syncService(fmt.Sprintf("%s/%s", ns, serviceName))
+	assert.Nil(t, err, "Expected no error syncing service")
+
+	// The EndpointSlice marked for deletion should be ignored by the controller, and thus
+	// should not result in any action.
+	if len(client.Actions()) != numActionsBefore {
+		t.Errorf("Expected 0 more actions, got %d", len(client.Actions())-numActionsBefore)
+	}
 }
 
 // Ensure SyncService correctly selects and labels EndpointSlices.
@@ -310,7 +358,7 @@ func TestSyncServiceEndpointSliceLabelSelection(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Expected no error adding EndpointSlice: %v", err)
 		}
-		_, err = client.DiscoveryV1beta1().EndpointSlices(ns).Create(context.TODO(), endpointSlice, metav1.CreateOptions{})
+		_, err = client.DiscoveryV1().EndpointSlices(ns).Create(context.TODO(), endpointSlice, metav1.CreateOptions{})
 		if err != nil {
 			t.Fatalf("Expected no error creating EndpointSlice: %v", err)
 		}
@@ -478,7 +526,7 @@ func TestSyncService(t *testing.T) {
 					},
 					Addresses: []string{"10.0.0.1"},
 					TargetRef: &v1.ObjectReference{Kind: "Pod", Namespace: "default", Name: "pod0"},
-					Topology:  map[string]string{"kubernetes.io/hostname": "node-1"},
+					NodeName:  utilpointer.StringPtr("node-1"),
 				},
 				{
 					Conditions: discovery.EndpointConditions{
@@ -486,7 +534,7 @@ func TestSyncService(t *testing.T) {
 					},
 					Addresses: []string{"10.0.0.2"},
 					TargetRef: &v1.ObjectReference{Kind: "Pod", Namespace: "default", Name: "pod1"},
-					Topology:  map[string]string{"kubernetes.io/hostname": "node-1"},
+					NodeName:  utilpointer.StringPtr("node-1"),
 				},
 			},
 		},
@@ -591,7 +639,7 @@ func TestSyncService(t *testing.T) {
 					},
 					Addresses: []string{"fd08::5678:0000:0000:9abc:def0"},
 					TargetRef: &v1.ObjectReference{Kind: "Pod", Namespace: "default", Name: "pod1"},
-					Topology:  map[string]string{"kubernetes.io/hostname": "node-1"},
+					NodeName:  utilpointer.StringPtr("node-1"),
 				},
 			},
 		},
@@ -696,7 +744,7 @@ func TestSyncService(t *testing.T) {
 					},
 					Addresses: []string{"10.0.0.1"},
 					TargetRef: &v1.ObjectReference{Kind: "Pod", Namespace: "default", Name: "pod0"},
-					Topology:  map[string]string{"kubernetes.io/hostname": "node-1"},
+					NodeName:  utilpointer.StringPtr("node-1"),
 				},
 				{
 					Conditions: discovery.EndpointConditions{
@@ -706,7 +754,7 @@ func TestSyncService(t *testing.T) {
 					},
 					Addresses: []string{"10.0.0.2"},
 					TargetRef: &v1.ObjectReference{Kind: "Pod", Namespace: "default", Name: "pod1"},
-					Topology:  map[string]string{"kubernetes.io/hostname": "node-1"},
+					NodeName:  utilpointer.StringPtr("node-1"),
 				},
 			},
 			terminatingGateEnabled: true,
@@ -810,7 +858,7 @@ func TestSyncService(t *testing.T) {
 					},
 					Addresses: []string{"10.0.0.1"},
 					TargetRef: &v1.ObjectReference{Kind: "Pod", Namespace: "default", Name: "pod0"},
-					Topology:  map[string]string{"kubernetes.io/hostname": "node-1"},
+					NodeName:  utilpointer.StringPtr("node-1"),
 				},
 			},
 			terminatingGateEnabled: false,
@@ -916,7 +964,7 @@ func TestSyncService(t *testing.T) {
 					},
 					Addresses: []string{"10.0.0.1"},
 					TargetRef: &v1.ObjectReference{Kind: "Pod", Namespace: "default", Name: "pod0"},
-					Topology:  map[string]string{"kubernetes.io/hostname": "node-1"},
+					NodeName:  utilpointer.StringPtr("node-1"),
 				},
 				{
 					Conditions: discovery.EndpointConditions{
@@ -926,7 +974,7 @@ func TestSyncService(t *testing.T) {
 					},
 					Addresses: []string{"10.0.0.2"},
 					TargetRef: &v1.ObjectReference{Kind: "Pod", Namespace: "default", Name: "pod1"},
-					Topology:  map[string]string{"kubernetes.io/hostname": "node-1"},
+					NodeName:  utilpointer.StringPtr("node-1"),
 				},
 			},
 			terminatingGateEnabled: true,
@@ -1030,7 +1078,7 @@ func TestSyncService(t *testing.T) {
 					},
 					Addresses: []string{"10.0.0.1"},
 					TargetRef: &v1.ObjectReference{Kind: "Pod", Namespace: "default", Name: "pod0"},
-					Topology:  map[string]string{"kubernetes.io/hostname": "node-1"},
+					NodeName:  utilpointer.StringPtr("node-1"),
 				},
 			},
 			terminatingGateEnabled: false,
@@ -1056,14 +1104,14 @@ func TestSyncService(t *testing.T) {
 
 			// last action should be to create endpoint slice
 			expectActions(t, client.Actions(), 1, "create", "endpointslices")
-			sliceList, err := client.DiscoveryV1beta1().EndpointSlices(testcase.service.Namespace).List(context.TODO(), metav1.ListOptions{})
+			sliceList, err := client.DiscoveryV1().EndpointSlices(testcase.service.Namespace).List(context.TODO(), metav1.ListOptions{})
 			assert.Nil(t, err, "Expected no error fetching endpoint slices")
 			assert.Len(t, sliceList.Items, 1, "Expected 1 endpoint slices")
 
 			// ensure all attributes of endpoint slice match expected state
 			slice := sliceList.Items[0]
-			assert.Equal(t, slice.Annotations["endpoints.kubernetes.io/last-change-trigger-time"], creationTimestamp.Format(time.RFC3339Nano))
-			assert.EqualValues(t, testcase.expectedEndpointPorts, slice.Ports)
+			assert.Equal(t, slice.Annotations[v1.EndpointsLastChangeTriggerTime], creationTimestamp.UTC().Format(time.RFC3339Nano))
+			assert.ElementsMatch(t, testcase.expectedEndpointPorts, slice.Ports)
 			assert.ElementsMatch(t, testcase.expectedEndpoints, slice.Endpoints)
 		})
 	}
@@ -1073,6 +1121,8 @@ func TestSyncService(t *testing.T) {
 // This test uses real time.Sleep, as there is no easy way to mock time in endpoints controller now.
 // TODO(mborsz): Migrate this test to mock clock when possible.
 func TestPodAddsBatching(t *testing.T) {
+	t.Parallel()
+
 	type podAdd struct {
 		delay time.Duration
 	}
@@ -1180,6 +1230,8 @@ func TestPodAddsBatching(t *testing.T) {
 // This test uses real time.Sleep, as there is no easy way to mock time in endpoints controller now.
 // TODO(mborsz): Migrate this test to mock clock when possible.
 func TestPodUpdatesBatching(t *testing.T) {
+	t.Parallel()
+
 	resourceVersion := 1
 	type podUpdate struct {
 		delay   time.Duration
@@ -1326,6 +1378,8 @@ func TestPodUpdatesBatching(t *testing.T) {
 // This test uses real time.Sleep, as there is no easy way to mock time in endpoints controller now.
 // TODO(mborsz): Migrate this test to mock clock when possible.
 func TestPodDeleteBatching(t *testing.T) {
+	t.Parallel()
+
 	type podDelete struct {
 		delay   time.Duration
 		podName string
@@ -1514,10 +1568,187 @@ func TestSyncServiceStaleInformer(t *testing.T) {
 
 			err = esController.syncService(fmt.Sprintf("%s/%s", ns, serviceName))
 			// Check if we got a StaleInformerCache error
-			if isStaleInformerCacheErr(err) != testcase.expectError {
+			if endpointsliceutil.IsStaleInformerCacheErr(err) != testcase.expectError {
 				t.Fatalf("Expected error because informer cache is outdated")
 			}
 
+		})
+	}
+}
+
+func Test_checkNodeTopologyDistribution(t *testing.T) {
+	zoneA := "zone-a"
+	zoneB := "zone-b"
+	zoneC := "zone-c"
+
+	readyTrue := true
+	readyFalse := false
+
+	cpu100 := resource.MustParse("100m")
+	cpu1000 := resource.MustParse("1000m")
+	cpu2000 := resource.MustParse("2000m")
+
+	type nodeInfo struct {
+		zoneLabel *string
+		ready     *bool
+		cpu       *resource.Quantity
+	}
+
+	testCases := []struct {
+		name                 string
+		nodes                []nodeInfo
+		topologyCacheEnabled bool
+		endpointZoneInfo     map[string]topologycache.EndpointZoneInfo
+		expectedQueueLen     int
+	}{{
+		name:                 "empty",
+		nodes:                []nodeInfo{},
+		topologyCacheEnabled: false,
+		endpointZoneInfo:     map[string]topologycache.EndpointZoneInfo{},
+		expectedQueueLen:     0,
+	}, {
+		name: "lopsided, queue required",
+		nodes: []nodeInfo{
+			{zoneLabel: &zoneA, ready: &readyTrue, cpu: &cpu100},
+			{zoneLabel: &zoneB, ready: &readyTrue, cpu: &cpu1000},
+			{zoneLabel: &zoneC, ready: &readyTrue, cpu: &cpu2000},
+		},
+		topologyCacheEnabled: true,
+		endpointZoneInfo: map[string]topologycache.EndpointZoneInfo{
+			"ns/svc1": {zoneA: 1, zoneB: 2, zoneC: 3},
+		},
+		expectedQueueLen: 1,
+	}, {
+		name: "lopsided but 1 unready, queue required because unready node means 0 CPU in one zone",
+		nodes: []nodeInfo{
+			{zoneLabel: &zoneA, ready: &readyFalse, cpu: &cpu100},
+			{zoneLabel: &zoneB, ready: &readyTrue, cpu: &cpu1000},
+			{zoneLabel: &zoneC, ready: &readyTrue, cpu: &cpu2000},
+		},
+		topologyCacheEnabled: true,
+		endpointZoneInfo: map[string]topologycache.EndpointZoneInfo{
+			"ns/svc1": {zoneA: 1, zoneB: 2, zoneC: 3},
+		},
+		expectedQueueLen: 1,
+	}, {
+		name: "even zones, uneven endpoint distribution but within threshold, no sync required",
+		nodes: []nodeInfo{
+			{zoneLabel: &zoneB, ready: &readyTrue, cpu: &cpu2000},
+			{zoneLabel: &zoneB, ready: &readyTrue, cpu: &cpu2000},
+			{zoneLabel: &zoneC, ready: &readyTrue, cpu: &cpu2000},
+			{zoneLabel: &zoneC, ready: &readyTrue, cpu: &cpu2000},
+		},
+		topologyCacheEnabled: true,
+		endpointZoneInfo: map[string]topologycache.EndpointZoneInfo{
+			"ns/svc1": {zoneB: 5, zoneC: 4},
+		},
+		expectedQueueLen: 0,
+	}, {
+		name: "even zones but node missing zone, sync required",
+		nodes: []nodeInfo{
+			{zoneLabel: &zoneB, ready: &readyTrue, cpu: &cpu2000},
+			{ready: &readyTrue, cpu: &cpu2000},
+			{zoneLabel: &zoneC, ready: &readyTrue, cpu: &cpu2000},
+			{zoneLabel: &zoneC, ready: &readyTrue, cpu: &cpu2000},
+		},
+		topologyCacheEnabled: true,
+		endpointZoneInfo: map[string]topologycache.EndpointZoneInfo{
+			"ns/svc1": {zoneB: 5, zoneC: 4},
+		},
+		expectedQueueLen: 1,
+	}, {
+		name: "even zones but node missing cpu, sync required",
+		nodes: []nodeInfo{
+			{zoneLabel: &zoneB, ready: &readyTrue, cpu: &cpu2000},
+			{zoneLabel: &zoneB, ready: &readyTrue},
+			{zoneLabel: &zoneC, ready: &readyTrue, cpu: &cpu2000},
+			{zoneLabel: &zoneC, ready: &readyTrue, cpu: &cpu2000},
+		},
+		topologyCacheEnabled: true,
+		endpointZoneInfo: map[string]topologycache.EndpointZoneInfo{
+			"ns/svc1": {zoneB: 5, zoneC: 4},
+		},
+		expectedQueueLen: 1,
+	}, {
+		name: "even zones, uneven endpoint distribution beyond threshold, no sync required",
+		nodes: []nodeInfo{
+			{zoneLabel: &zoneB, ready: &readyTrue, cpu: &cpu2000},
+			{zoneLabel: &zoneB, ready: &readyTrue, cpu: &cpu2000},
+			{zoneLabel: &zoneC, ready: &readyTrue, cpu: &cpu2000},
+			{zoneLabel: &zoneC, ready: &readyTrue, cpu: &cpu2000},
+		},
+		topologyCacheEnabled: true,
+		endpointZoneInfo: map[string]topologycache.EndpointZoneInfo{
+			"ns/svc1": {zoneB: 6, zoneC: 4},
+		},
+		expectedQueueLen: 1,
+	}, {
+		name: "3 uneven zones, matching endpoint distribution, no sync required",
+		nodes: []nodeInfo{
+			{zoneLabel: &zoneA, ready: &readyTrue, cpu: &cpu2000},
+			{zoneLabel: &zoneB, ready: &readyTrue, cpu: &cpu1000},
+			{zoneLabel: &zoneC, ready: &readyTrue, cpu: &cpu100},
+		},
+		topologyCacheEnabled: true,
+		endpointZoneInfo: map[string]topologycache.EndpointZoneInfo{
+			"ns/svc1": {zoneA: 20, zoneB: 10, zoneC: 1},
+		},
+		expectedQueueLen: 0,
+	}, {
+		name: "3 uneven zones, endpoint distribution within threshold but below 1, sync required",
+		nodes: []nodeInfo{
+			{zoneLabel: &zoneA, ready: &readyTrue, cpu: &cpu2000},
+			{zoneLabel: &zoneB, ready: &readyTrue, cpu: &cpu1000},
+			{zoneLabel: &zoneC, ready: &readyTrue, cpu: &cpu100},
+		},
+		topologyCacheEnabled: true,
+		endpointZoneInfo: map[string]topologycache.EndpointZoneInfo{
+			"ns/svc1": {zoneA: 20, zoneB: 10, zoneC: 0},
+		},
+		expectedQueueLen: 1,
+	}}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, esController := newController([]string{}, time.Duration(0))
+
+			for i, nodeInfo := range tc.nodes {
+				node := &v1.Node{
+					ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("node-%d", i)},
+					Status:     v1.NodeStatus{},
+				}
+				if nodeInfo.zoneLabel != nil {
+					node.Labels = map[string]string{v1.LabelTopologyZone: *nodeInfo.zoneLabel}
+				}
+				if nodeInfo.ready != nil {
+					status := v1.ConditionFalse
+					if *nodeInfo.ready {
+						status = v1.ConditionTrue
+					}
+					node.Status.Conditions = []v1.NodeCondition{{
+						Type:   v1.NodeReady,
+						Status: status,
+					}}
+				}
+				if nodeInfo.cpu != nil {
+					node.Status.Allocatable = v1.ResourceList{
+						v1.ResourceCPU: *nodeInfo.cpu,
+					}
+				}
+				esController.nodeStore.Add(node)
+				if tc.topologyCacheEnabled {
+					esController.topologyCache = topologycache.NewTopologyCache()
+					for serviceKey, endpointZoneInfo := range tc.endpointZoneInfo {
+						esController.topologyCache.SetHints(serviceKey, discovery.AddressTypeIPv4, endpointZoneInfo)
+					}
+				}
+			}
+
+			esController.checkNodeTopologyDistribution()
+
+			if esController.queue.Len() != tc.expectedQueueLen {
+				t.Errorf("Expected %d services to be queued, got %d", tc.expectedQueueLen, esController.queue.Len())
+			}
 		})
 	}
 }
@@ -1620,5 +1851,62 @@ func (cmc *cacheMutationCheck) Check(t *testing.T) {
 			// copied before changed in any way.
 			t.Errorf("Cached object was unexpectedly mutated. Original: %+v, Mutated: %+v", o.deepCopy, o.original)
 		}
+	}
+}
+
+func Test_dropEndpointSlicesPendingDeletion(t *testing.T) {
+	now := metav1.Now()
+	endpointSlices := []*discovery.EndpointSlice{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "epSlice1",
+				DeletionTimestamp: &now,
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "epSlice2",
+			},
+			AddressType: discovery.AddressTypeIPv4,
+			Endpoints: []discovery.Endpoint{
+				{
+					Addresses: []string{"172.18.0.2"},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "epSlice3",
+			},
+			AddressType: discovery.AddressTypeIPv6,
+			Endpoints: []discovery.Endpoint{
+				{
+					Addresses: []string{"3001:0da8:75a3:0000:0000:8a2e:0370:7334"},
+				},
+			},
+		},
+	}
+
+	epSlice2 := endpointSlices[1]
+	epSlice3 := endpointSlices[2]
+
+	result := dropEndpointSlicesPendingDeletion(endpointSlices)
+
+	assert.Len(t, result, 2)
+	for _, epSlice := range result {
+		if epSlice.Name == "epSlice1" {
+			t.Errorf("Expected EndpointSlice marked for deletion to be dropped.")
+		}
+	}
+
+	// We don't use endpointSlices and instead check manually for equality, because
+	// `dropEndpointSlicesPendingDeletion` mutates the slice it receives, so it's easy
+	// to break this test later. This way, we can be absolutely sure that the result
+	// has exactly what we expect it to.
+	if !reflect.DeepEqual(epSlice2, result[0]) {
+		t.Errorf("EndpointSlice was unexpectedly mutated. Expected: %+v, Mutated: %+v", epSlice2, result[0])
+	}
+	if !reflect.DeepEqual(epSlice3, result[1]) {
+		t.Errorf("EndpointSlice was unexpectedly mutated. Expected: %+v, Mutated: %+v", epSlice3, result[1])
 	}
 }

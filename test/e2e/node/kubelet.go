@@ -39,6 +39,7 @@ import (
 	e2evolume "k8s.io/kubernetes/test/e2e/framework/volume"
 	testutils "k8s.io/kubernetes/test/utils"
 	imageutils "k8s.io/kubernetes/test/utils/image"
+	admissionapi "k8s.io/pod-security-admission/api"
 
 	"github.com/onsi/ginkgo"
 )
@@ -270,13 +271,14 @@ var _ = SIGDescribe("kubelet", func() {
 		ns string
 	)
 	f := framework.NewDefaultFramework("kubelet")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 
 	ginkgo.BeforeEach(func() {
 		c = f.ClientSet
 		ns = f.Namespace.Name
 	})
 
-	SIGDescribe("Clean up pods on node", func() {
+	ginkgo.Describe("Clean up pods on node", func() {
 		var (
 			numNodes        int
 			nodeNames       sets.String
@@ -384,7 +386,7 @@ var _ = SIGDescribe("kubelet", func() {
 	})
 
 	// Test host cleanup when disrupting the volume environment.
-	SIGDescribe("host cleanup with volume mounts [sig-storage][HostCleanup][Flaky]", func() {
+	ginkgo.Describe("host cleanup with volume mounts [HostCleanup][Flaky]", func() {
 
 		type hostCleanupTest struct {
 			itDescr string

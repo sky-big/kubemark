@@ -29,6 +29,8 @@ import (
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	e2eservice "k8s.io/kubernetes/test/e2e/framework/service"
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
+	"k8s.io/kubernetes/test/e2e/network/common"
+	admissionapi "k8s.io/pod-security-admission/api"
 
 	"github.com/onsi/ginkgo"
 )
@@ -36,8 +38,9 @@ import (
 const dnsTestPodHostName = "dns-querier-1"
 const dnsTestServiceName = "dns-test-service"
 
-var _ = SIGDescribe("DNS", func() {
+var _ = common.SIGDescribe("DNS", func() {
 	f := framework.NewDefaultFramework("dns")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelBaseline
 
 	/*
 		Release: v1.9
@@ -111,7 +114,7 @@ var _ = SIGDescribe("DNS", func() {
 		Testname: DNS, cluster
 		Description: When a Pod is created, the pod MUST be able to resolve cluster dns entries such as kubernetes.default via /etc/hosts.
 	*/
-	framework.ConformanceIt("should provide /etc/hosts entries for the cluster [LinuxOnly]", func() {
+	framework.ConformanceIt("should provide /etc/hosts entries for the cluster", func() {
 		hostFQDN := fmt.Sprintf("%s.%s.%s.svc.%s", dnsTestPodHostName, dnsTestServiceName, f.Namespace.Name, framework.TestContext.ClusterDNSDomain)
 		hostEntries := []string{hostFQDN, dnsTestPodHostName}
 		// TODO: Validate both IPv4 and IPv6 families for dual-stack
@@ -242,7 +245,7 @@ var _ = SIGDescribe("DNS", func() {
 		Description: Create a headless service with label. Create a Pod with label to match service's label, with hostname and a subdomain same as service name.
 		Pod MUST be able to resolve its fully qualified domain name as well as hostname by serving an A record at that name.
 	*/
-	framework.ConformanceIt("should provide DNS for pods for Hostname [LinuxOnly]", func() {
+	framework.ConformanceIt("should provide DNS for pods for Hostname", func() {
 		// Create a test headless service.
 		ginkgo.By("Creating a test headless service")
 		testServiceSelector := map[string]string{

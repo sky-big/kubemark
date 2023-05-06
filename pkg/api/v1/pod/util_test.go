@@ -203,6 +203,7 @@ func TestFindPort(t *testing.T) {
 }
 
 func TestVisitContainers(t *testing.T) {
+	setAllFeatureEnabledContainersDuringTest := ContainerType(0)
 	testCases := []struct {
 		desc                       string
 		spec                       *v1.PodSpec
@@ -309,7 +310,7 @@ func TestVisitContainers(t *testing.T) {
 				},
 			},
 			wantContainers: []string{"i1", "i2", "c1", "c2"},
-			mask:           AllFeatureEnabledContainers(),
+			mask:           setAllFeatureEnabledContainersDuringTest,
 		},
 		{
 			desc: "all feature enabled container types with ephemeral containers enabled",
@@ -328,7 +329,7 @@ func TestVisitContainers(t *testing.T) {
 				},
 			},
 			wantContainers:             []string{"i1", "i2", "c1", "c2", "e1", "e2"},
-			mask:                       AllFeatureEnabledContainers(),
+			mask:                       setAllFeatureEnabledContainersDuringTest,
 			ephemeralContainersEnabled: true,
 		},
 		{
@@ -354,8 +355,9 @@ func TestVisitContainers(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
-			if tc.ephemeralContainersEnabled {
-				defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.EphemeralContainers, tc.ephemeralContainersEnabled)()
+			defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.EphemeralContainers, tc.ephemeralContainersEnabled)()
+
+			if tc.mask == setAllFeatureEnabledContainersDuringTest {
 				tc.mask = AllFeatureEnabledContainers()
 			}
 
@@ -747,6 +749,48 @@ func TestIsPodAvailable(t *testing.T) {
 	}
 }
 
+func TestIsPodTerminal(t *testing.T) {
+	now := metav1.Now()
+
+	tests := []struct {
+		podPhase v1.PodPhase
+		expected bool
+	}{
+		{
+			podPhase: v1.PodFailed,
+			expected: true,
+		},
+		{
+			podPhase: v1.PodSucceeded,
+			expected: true,
+		},
+		{
+			podPhase: v1.PodUnknown,
+			expected: false,
+		},
+		{
+			podPhase: v1.PodPending,
+			expected: false,
+		},
+		{
+			podPhase: v1.PodRunning,
+			expected: false,
+		},
+		{
+			expected: false,
+		},
+	}
+
+	for i, test := range tests {
+		pod := newPod(now, true, 0)
+		pod.Status.Phase = test.podPhase
+		isTerminal := IsPodTerminal(pod)
+		if isTerminal != test.expected {
+			t.Errorf("[tc #%d] expected terminal pod: %t, got: %t", i, test.expected, isTerminal)
+		}
+	}
+}
+
 func TestGetContainerStatus(t *testing.T) {
 	type ExpectedStruct struct {
 		status v1.ContainerStatus
@@ -858,5 +902,99 @@ func TestUpdatePodCondition(t *testing.T) {
 		resultStatus := UpdatePodCondition(test.status, &test.conditions)
 
 		assert.Equal(t, test.expected, resultStatus, test.desc)
+	}
+}
+
+func TestGetContainersReadyCondition(t *testing.T) {
+	time := metav1.Now()
+
+	containersReadyCondition := v1.PodCondition{
+		Type:               v1.ContainersReady,
+		Status:             v1.ConditionTrue,
+		Reason:             "successfully",
+		Message:            "sync pod successfully",
+		LastProbeTime:      time,
+		LastTransitionTime: metav1.NewTime(time.Add(1000)),
+	}
+
+	tests := []struct {
+		desc              string
+		podStatus         v1.PodStatus
+		expectedCondition *v1.PodCondition
+	}{
+		{
+			desc: "containers ready condition exists",
+			podStatus: v1.PodStatus{
+				Conditions: []v1.PodCondition{containersReadyCondition},
+			},
+			expectedCondition: &containersReadyCondition,
+		},
+		{
+			desc: "containers ready condition does not exist",
+			podStatus: v1.PodStatus{
+				Conditions: []v1.PodCondition{},
+			},
+			expectedCondition: nil,
+		},
+	}
+
+	for _, test := range tests {
+		containersReadyCondition := GetContainersReadyCondition(test.podStatus)
+		assert.Equal(t, test.expectedCondition, containersReadyCondition, test.desc)
+	}
+}
+
+func TestIsContainersReadyConditionTrue(t *testing.T) {
+	time := metav1.Now()
+
+	tests := []struct {
+		desc      string
+		podStatus v1.PodStatus
+		expected  bool
+	}{
+		{
+			desc: "containers ready condition is true",
+			podStatus: v1.PodStatus{
+				Conditions: []v1.PodCondition{
+					{
+						Type:               v1.ContainersReady,
+						Status:             v1.ConditionTrue,
+						Reason:             "successfully",
+						Message:            "sync pod successfully",
+						LastProbeTime:      time,
+						LastTransitionTime: metav1.NewTime(time.Add(1000)),
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			desc: "containers ready condition is false",
+			podStatus: v1.PodStatus{
+				Conditions: []v1.PodCondition{
+					{
+						Type:               v1.ContainersReady,
+						Status:             v1.ConditionFalse,
+						Reason:             "successfully",
+						Message:            "sync pod successfully",
+						LastProbeTime:      time,
+						LastTransitionTime: metav1.NewTime(time.Add(1000)),
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			desc: "containers ready condition is empty",
+			podStatus: v1.PodStatus{
+				Conditions: []v1.PodCondition{},
+			},
+			expected: false,
+		},
+	}
+
+	for _, test := range tests {
+		isContainersReady := IsContainersReadyConditionTrue(test.podStatus)
+		assert.Equal(t, test.expected, isContainersReady, test.desc)
 	}
 }

@@ -33,6 +33,7 @@ import (
 	e2ekubectl "k8s.io/kubernetes/test/e2e/framework/kubectl"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	imageutils "k8s.io/kubernetes/test/utils/image"
+	admissionapi "k8s.io/pod-security-admission/api"
 
 	"github.com/onsi/ginkgo"
 	"github.com/onsi/gomega"
@@ -65,6 +66,7 @@ func scTestPod(hostIPC bool, hostPID bool) *v1.Pod {
 
 var _ = SIGDescribe("Security Context", func() {
 	f := framework.NewDefaultFramework("security-context")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 
 	ginkgo.It("should support pod.Spec.SecurityContext.SupplementalGroups [LinuxOnly]", func() {
 		pod := scTestPod(false, false)
@@ -86,7 +88,13 @@ var _ = SIGDescribe("Security Context", func() {
 		})
 	})
 
-	ginkgo.It("should support pod.Spec.SecurityContext.RunAsUser And pod.Spec.SecurityContext.RunAsGroup [LinuxOnly]", func() {
+	/*
+		Release: v1.21
+		Testname: Security Context, test RunAsGroup at pod level
+		Description: Container is created with runAsUser and runAsGroup option by passing uid 1001 and gid 2002 at pod level. Pod MUST be in Succeeded phase.
+		[LinuxOnly]: This test is marked as LinuxOnly since Windows does not support running as UID / GID.
+	*/
+	framework.ConformanceIt("should support pod.Spec.SecurityContext.RunAsUser And pod.Spec.SecurityContext.RunAsGroup [LinuxOnly]", func() {
 		pod := scTestPod(false, false)
 		userID := int64(1001)
 		groupID := int64(2002)
@@ -115,7 +123,13 @@ var _ = SIGDescribe("Security Context", func() {
 		})
 	})
 
-	ginkgo.It("should support container.SecurityContext.RunAsUser And container.SecurityContext.RunAsGroup [LinuxOnly]", func() {
+	/*
+		Release: v1.21
+		Testname: Security Context, test RunAsGroup at container level
+		Description: Container is created with runAsUser and runAsGroup option by passing uid 1001 and gid 2002 at containr level. Pod MUST be in Succeeded phase.
+		[LinuxOnly]: This test is marked as LinuxOnly since Windows does not support running as UID / GID.
+	*/
+	framework.ConformanceIt("should support container.SecurityContext.RunAsUser And container.SecurityContext.RunAsGroup [LinuxOnly]", func() {
 		pod := scTestPod(false, false)
 		userID := int64(1001)
 		groupID := int64(2001)
@@ -222,8 +236,8 @@ func testPodSELinuxLabeling(f *framework.Framework, hostIPC bool, hostPID bool) 
 
 	// Confirm that the file can be accessed from a second
 	// pod using host_path with the same MCS label
-	volumeHostPath := fmt.Sprintf("%s/pods/%s/volumes/kubernetes.io~empty-dir/%s", framework.TestContext.KubeVolumeDir, foundPod.UID, volumeName)
-	ginkgo.By(fmt.Sprintf("confirming a container with the same label can read the file under --volume-dir=%s", framework.TestContext.KubeVolumeDir))
+	volumeHostPath := fmt.Sprintf("%s/pods/%s/volumes/kubernetes.io~empty-dir/%s", framework.TestContext.KubeletRootDir, foundPod.UID, volumeName)
+	ginkgo.By(fmt.Sprintf("confirming a container with the same label can read the file under --kubelet-root-dir=%s", framework.TestContext.KubeletRootDir))
 	pod = scTestPod(hostIPC, hostPID)
 	pod.Spec.NodeName = foundPod.Spec.NodeName
 	volumeMounts := []v1.VolumeMount{

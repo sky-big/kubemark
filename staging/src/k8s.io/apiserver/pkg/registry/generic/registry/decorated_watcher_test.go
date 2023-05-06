@@ -18,7 +18,6 @@ package registry
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
@@ -31,11 +30,10 @@ import (
 
 func TestDecoratedWatcher(t *testing.T) {
 	w := watch.NewFake()
-	decorator := func(obj runtime.Object) error {
+	decorator := func(obj runtime.Object) {
 		if pod, ok := obj.(*example.Pod); ok {
 			pod.Annotations = map[string]string{"decorated": "true"}
 		}
-		return nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	dw := newDecoratedWatcher(ctx, w, decorator)
@@ -106,25 +104,5 @@ func expectErrorEvent(t *testing.T, dw *decoratedWatcher) {
 		}
 	case <-time.After(wait.ForeverTestTimeout):
 		t.Fatalf("timeout after %v", wait.ForeverTestTimeout)
-	}
-}
-
-func TestDecoratedWatcherError(t *testing.T) {
-	w := watch.NewFake()
-	expErr := fmt.Errorf("expected error")
-	decorator := func(obj runtime.Object) error {
-		return expErr
-	}
-	dw := newDecoratedWatcher(context.Background(), w, decorator)
-	defer dw.Stop()
-
-	go w.Add(&example.Pod{ObjectMeta: metav1.ObjectMeta{Name: "foo"}})
-	select {
-	case e := <-dw.ResultChan():
-		if e.Type != watch.Error {
-			t.Errorf("event type want=%v, get=%v", watch.Error, e.Type)
-		}
-	case <-time.After(wait.ForeverTestTimeout):
-		t.Errorf("timeout after %v", wait.ForeverTestTimeout)
 	}
 }

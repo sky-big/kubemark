@@ -66,11 +66,11 @@ func TestWatchRestartsIfTimeoutNotReached(t *testing.T) {
 	// Has to be longer than 5 seconds
 	timeout := 30 * time.Second
 
-	// Set up a master
-	masterConfig := framework.NewIntegrationTestMasterConfig()
+	// Set up an API server
+	controlPlaneConfig := framework.NewIntegrationTestControlPlaneConfig()
 	// Timeout is set random between MinRequestTimeout and 2x
-	masterConfig.GenericConfig.MinRequestTimeout = int(timeout.Seconds()) / 4
-	_, s, closeFn := framework.RunAMaster(masterConfig)
+	controlPlaneConfig.GenericConfig.MinRequestTimeout = int(timeout.Seconds()) / 4
+	_, s, closeFn := framework.RunAnAPIServer(controlPlaneConfig)
 	defer closeFn()
 
 	config := &restclient.Config{
@@ -121,7 +121,8 @@ func TestWatchRestartsIfTimeoutNotReached(t *testing.T) {
 				patch := fmt.Sprintf(`{"metadata": {"annotations": {"count": "%d"}}}`, counter)
 				_, err := c.CoreV1().Secrets(secret.Namespace).Patch(context.TODO(), secret.Name, types.StrategicMergePatchType, []byte(patch), metav1.PatchOptions{})
 				if err != nil {
-					t.Fatalf("Failed to patch secret: %v", err)
+					t.Errorf("Failed to patch secret: %v", err)
+					return
 				}
 
 				*referenceOutput = append(*referenceOutput, fmt.Sprintf("%d", counter))

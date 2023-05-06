@@ -22,8 +22,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-openapi/spec"
-
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -32,6 +30,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 	"k8s.io/kube-openapi/pkg/handler"
+	"k8s.io/kube-openapi/pkg/validation/spec"
 
 	apiextensionshelpers "k8s.io/apiextensions-apiserver/pkg/apihelpers"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -202,8 +201,10 @@ func buildVersionSpecs(crd *apiextensionsv1.CustomResourceDefinition, oldSpecs m
 		if !v.Served {
 			continue
 		}
-		// Defaults are not pruned here, but before being served.
-		spec, err := builder.BuildSwagger(crd, v.Name, builder.Options{V2: true})
+		spec, err := builder.BuildOpenAPIV2(crd, v.Name, builder.Options{V2: true})
+		// Defaults must be pruned here for CRDs to cleanly merge with the static
+		// spec that already has defaults pruned
+		spec.Definitions = handler.PruneDefaults(spec.Definitions)
 		if err != nil {
 			return nil, false, err
 		}

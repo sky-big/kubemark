@@ -11,6 +11,9 @@
 },
 "spec":{
 "securityContext": {
+    {{runAsUser}}
+    {{runAsGroup}}
+    {{supplementalGroups}}
     "seccompProfile": {
         "type": "RuntimeDefault"
     }
@@ -21,6 +24,7 @@
 "containers":[
     {
     "name": "kube-apiserver",
+    {{containerSecurityContext}}
     "image": "{{pillar['kube_docker_registry']}}/kube-apiserver-amd64:{{pillar['kube-apiserver_docker_tag']}}",
     "resources": {
       "requests": {
@@ -70,7 +74,6 @@
         {{csc_config_mount}}
         {{audit_policy_config_mount}}
         {{audit_webhook_config_mount}}
-        {{webhook_exec_auth_plugin_mount}}
         {{konnectivity_socket_mount}}
         { "name": "srvkube",
         "mountPath": "/etc/srv/kubernetes",
@@ -112,7 +115,6 @@
   {{csc_config_volume}}
   {{audit_policy_config_volume}}
   {{audit_webhook_config_volume}}
-  {{webhook_exec_auth_plugin_volume}}
   {{konnectivity_socket_volume}}
   { "name": "srvkube",
     "hostPath": {

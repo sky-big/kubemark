@@ -200,7 +200,7 @@ func (b *flockerVolume) GetDatasetUUID() (datasetUUID string, err error) {
 	}
 
 	if b.flockerClient == nil {
-		return "", fmt.Errorf("Flocker client is not initialized")
+		return "", fmt.Errorf("flocker client is not initialized")
 	}
 
 	// lookup in flocker API otherwise
@@ -214,17 +214,10 @@ type flockerVolumeMounter struct {
 
 func (b *flockerVolumeMounter) GetAttributes() volume.Attributes {
 	return volume.Attributes{
-		ReadOnly:        b.readOnly,
-		Managed:         false,
-		SupportsSELinux: false,
+		ReadOnly:       b.readOnly,
+		Managed:        false,
+		SELinuxRelabel: false,
 	}
-}
-
-// Checks prior to mount operations to verify that the required components (binaries, etc.)
-// to mount the volume are available on the underlying node.
-// If not, it returns an error
-func (b *flockerVolumeMounter) CanMount() error {
-	return nil
 }
 
 func (b *flockerVolumeMounter) GetPath() string {
@@ -267,12 +260,12 @@ func (b *flockerVolumeMounter) newFlockerClient() (*flockerapi.Client, error) {
 SetUpAt will setup a Flocker volume following this flow of calls to the Flocker
 control service:
 
-1. Get the dataset id for the given volume name/dir
-2. It should already be there, if it's not the user needs to manually create it
-3. Check the current Primary UUID
-4. If it doesn't match with the Primary UUID that we got on 2, then we will
-   need to update the Primary UUID for this volume.
-5. Wait until the Primary UUID was updated or timeout.
+ 1. Get the dataset id for the given volume name/dir
+ 2. It should already be there, if it's not the user needs to manually create it
+ 3. Check the current Primary UUID
+ 4. If it doesn't match with the Primary UUID that we got on 2, then we will
+    need to update the Primary UUID for this volume.
+ 5. Wait until the Primary UUID was updated or timeout.
 */
 func (b *flockerVolumeMounter) SetUpAt(dir string, mounterArgs volume.MounterArgs) error {
 	var err error
@@ -285,12 +278,12 @@ func (b *flockerVolumeMounter) SetUpAt(dir string, mounterArgs volume.MounterArg
 
 	datasetUUID, err := b.GetDatasetUUID()
 	if err != nil {
-		return fmt.Errorf("The datasetUUID for volume with datasetName='%s' can not be found using flocker: %s", b.datasetName, err)
+		return fmt.Errorf("the datasetUUID for volume with datasetName='%s' can not be found using flocker: %s", b.datasetName, err)
 	}
 
 	datasetState, err := b.flockerClient.GetDatasetState(datasetUUID)
 	if err != nil {
-		return fmt.Errorf("The datasetState for volume with datasetUUID='%s' could not determinted uusing flocker: %s", datasetUUID, err)
+		return fmt.Errorf("the datasetState for volume with datasetUUID='%s' could not determinted uusing flocker: %s", datasetUUID, err)
 	}
 
 	primaryUUID, err := b.flockerClient.GetPrimaryUUID()
@@ -304,7 +297,7 @@ func (b *flockerVolumeMounter) SetUpAt(dir string, mounterArgs volume.MounterArg
 		}
 		_, err := b.flockerClient.GetDatasetState(datasetUUID)
 		if err != nil {
-			return fmt.Errorf("The volume with datasetUUID='%s' migrated unsuccessfully", datasetUUID)
+			return fmt.Errorf("the volume with datasetUUID='%s' migrated unsuccessfully", datasetUUID)
 		}
 	}
 

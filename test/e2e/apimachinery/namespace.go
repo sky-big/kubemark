@@ -33,6 +33,7 @@ import (
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	imageutils "k8s.io/kubernetes/test/utils/image"
+	admissionapi "k8s.io/pod-security-admission/api"
 
 	"github.com/onsi/ginkgo"
 	"k8s.io/apimachinery/pkg/types"
@@ -198,9 +199,10 @@ func ensureServicesAreRemovedWhenNamespaceIsDeleted(f *framework.Framework) {
 // This test must run [Serial] due to the impact of running other parallel
 // tests can have on its performance.  Each test that follows the common
 // test framework follows this pattern:
-//   1. Create a Namespace
-//   2. Do work that generates content in that namespace
-//   3. Delete a Namespace
+//  1. Create a Namespace
+//  2. Do work that generates content in that namespace
+//  3. Delete a Namespace
+//
 // Creation of a Namespace is non-trivial since it requires waiting for a
 // ServiceAccount to be generated.
 // Deletion of a Namespace is non-trivial and performance intensive since
@@ -226,6 +228,7 @@ func ensureServicesAreRemovedWhenNamespaceIsDeleted(f *framework.Framework) {
 var _ = SIGDescribe("Namespaces [Serial]", func() {
 
 	f := framework.NewDefaultFramework("namespaces")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelBaseline
 
 	/*
 		Release: v1.11

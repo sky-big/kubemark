@@ -17,6 +17,7 @@ limitations under the License.
 package operationexecutor
 
 import (
+	"k8s.io/apimachinery/pkg/api/resource"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -32,13 +33,13 @@ import (
 type fakeOGCounter struct {
 	// calledFuncs stores name and count of functions
 	calledFuncs map[string]int
-	opFunc      func() (error, error)
+	opFunc      func() volumetypes.OperationContext
 }
 
 var _ OperationGenerator = &fakeOGCounter{}
 
 // NewFakeOGCounter returns a OperationGenerator
-func NewFakeOGCounter(opFunc func() (error, error)) OperationGenerator {
+func NewFakeOGCounter(opFunc func() volumetypes.OperationContext) OperationGenerator {
 	return &fakeOGCounter{
 		calledFuncs: map[string]int{},
 		opFunc:      opFunc,
@@ -104,7 +105,11 @@ func (f *fakeOGCounter) GenerateExpandVolumeFunc(*v1.PersistentVolumeClaim, *v1.
 	return f.recordFuncCall("GenerateExpandVolumeFunc"), nil
 }
 
-func (f *fakeOGCounter) GenerateExpandInUseVolumeFunc(volumeToMount VolumeToMount, actualStateOfWorld ActualStateOfWorldMounterUpdater) (volumetypes.GeneratedOperations, error) {
+func (f *fakeOGCounter) GenerateExpandAndRecoverVolumeFunc(*v1.PersistentVolumeClaim, *v1.PersistentVolume, string) (volumetypes.GeneratedOperations, error) {
+	return f.recordFuncCall("GenerateExpandVolumeFunc"), nil
+}
+
+func (f *fakeOGCounter) GenerateExpandInUseVolumeFunc(volumeToMount VolumeToMount, actualStateOfWorld ActualStateOfWorldMounterUpdater, currentSize resource.Quantity) (volumetypes.GeneratedOperations, error) {
 	return f.recordFuncCall("GenerateExpandInUseVolumeFunc"), nil
 }
 

@@ -24,9 +24,8 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/component-helpers/scheduling/corev1/nodeaffinity"
 	"k8s.io/kubernetes/pkg/scheduler/framework"
-	pluginhelper "k8s.io/kubernetes/pkg/scheduler/framework/plugins/helper"
-	"k8s.io/kubernetes/pkg/scheduler/internal/parallelize"
 )
 
 const preScoreStateKey = "PreScore" + Name
@@ -60,14 +59,14 @@ func (s *preScoreState) Clone() framework.StateData {
 func (pl *PodTopologySpread) initPreScoreState(s *preScoreState, pod *v1.Pod, filteredNodes []*v1.Node, requireAllTopologies bool) error {
 	var err error
 	if len(pod.Spec.TopologySpreadConstraints) > 0 {
-		s.Constraints, err = filterTopologySpreadConstraints(pod.Spec.TopologySpreadConstraints, v1.ScheduleAnyway)
+		s.Constraints, err = filterTopologySpreadConstraints(pod.Spec.TopologySpreadConstraints, v1.ScheduleAnyway, pl.enableMinDomainsInPodTopologySpread)
 		if err != nil {
-			return fmt.Errorf("obtaining pod's soft topology spread constraints: %v", err)
+			return fmt.Errorf("obtaining pod's soft topology spread constraints: %w", err)
 		}
 	} else {
 		s.Constraints, err = pl.buildDefaultConstraints(pod, v1.ScheduleAnyway)
 		if err != nil {
-			return fmt.Errorf("setting default soft topology spread constraints: %v", err)
+			return fmt.Errorf("setting default soft topology spread constraints: %w", err)
 		}
 	}
 	if len(s.Constraints) == 0 {
@@ -141,6 +140,8 @@ func (pl *PodTopologySpread) PreScore(
 		return nil
 	}
 
+	// Ignore parsing errors for backwards compatibility.
+	requiredNodeAffinity := nodeaffinity.GetRequiredNodeAffinity(pod)
 	processAllNode := func(i int) {
 		nodeInfo := allNodes[i]
 		node := nodeInfo.Node()
@@ -149,8 +150,8 @@ func (pl *PodTopologySpread) PreScore(
 		}
 		// (1) `node` should satisfy incoming pod's NodeSelector/NodeAffinity
 		// (2) All topologyKeys need to be present in `node`
-		if !pluginhelper.PodMatchesNodeSelectorAndAffinityTerms(pod, node) ||
-			(requireAllTopologies && !nodeLabelsMatchSpreadConstraints(node.Labels, state.Constraints)) {
+		match, _ := requiredNodeAffinity.Match(node)
+		if !match || (requireAllTopologies && !nodeLabelsMatchSpreadConstraints(node.Labels, state.Constraints)) {
 			return
 		}
 
@@ -167,7 +168,7 @@ func (pl *PodTopologySpread) PreScore(
 			atomic.AddInt64(tpCount, int64(count))
 		}
 	}
-	parallelize.Until(ctx, len(allNodes), processAllNode)
+	pl.parallelizer.Until(ctx, len(allNodes), processAllNode)
 
 	cycleState.Write(preScoreStateKey, state)
 	return nil
@@ -208,7 +209,7 @@ func (pl *PodTopologySpread) Score(ctx context.Context, cycleState *framework.Cy
 			score += scoreForCount(cnt, c.MaxSkew, s.TopologyNormalizingWeight[i])
 		}
 	}
-	return int64(score), nil
+	return int64(math.Round(score)), nil
 }
 
 // NormalizeScore invoked after scoring all nodes.
@@ -261,7 +262,7 @@ func (pl *PodTopologySpread) ScoreExtensions() framework.ScoreExtensions {
 func getPreScoreState(cycleState *framework.CycleState) (*preScoreState, error) {
 	c, err := cycleState.Read(preScoreStateKey)
 	if err != nil {
-		return nil, fmt.Errorf("error reading %q from cycleState: %v", preScoreStateKey, err)
+		return nil, fmt.Errorf("error reading %q from cycleState: %w", preScoreStateKey, err)
 	}
 
 	s, ok := c.(*preScoreState)

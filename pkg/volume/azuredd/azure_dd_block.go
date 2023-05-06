@@ -1,3 +1,4 @@
+//go:build !providerless
 // +build !providerless
 
 /*
@@ -104,10 +105,18 @@ func (plugin *azureDataDiskPlugin) newBlockVolumeMapperInternal(spec *volume.Spe
 
 	disk := makeDataDisk(spec.Name(), podUID, volumeSource.DiskName, plugin.host, plugin)
 
-	return &azureDataDiskMapper{
+	mapper := &azureDataDiskMapper{
 		dataDisk: disk,
 		readOnly: readOnly,
-	}, nil
+	}
+
+	blockPath, err := mapper.GetGlobalMapPath(spec)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get device path: %v", err)
+	}
+	mapper.MetricsProvider = volume.NewMetricsBlock(filepath.Join(blockPath, string(podUID)))
+
+	return mapper, nil
 }
 
 func (plugin *azureDataDiskPlugin) NewBlockVolumeUnmapper(volName string, podUID types.UID) (volume.BlockVolumeUnmapper, error) {
@@ -121,6 +130,7 @@ func (plugin *azureDataDiskPlugin) newUnmapperInternal(volName string, podUID ty
 
 type azureDataDiskUnmapper struct {
 	*dataDisk
+	volume.MetricsNil
 }
 
 var _ volume.BlockVolumeUnmapper = &azureDataDiskUnmapper{}
@@ -134,7 +144,8 @@ var _ volume.BlockVolumeMapper = &azureDataDiskMapper{}
 
 // GetGlobalMapPath returns global map path and error
 // path: plugins/kubernetes.io/{PluginName}/volumeDevices/volumeID
-//       plugins/kubernetes.io/azure-disk/volumeDevices/vol-XXXXXX
+//
+//	plugins/kubernetes.io/azure-disk/volumeDevices/vol-XXXXXX
 func (disk *dataDisk) GetGlobalMapPath(spec *volume.Spec) (string, error) {
 	volumeSource, _, err := getVolumeSource(spec)
 	if err != nil {
@@ -148,4 +159,10 @@ func (disk *dataDisk) GetGlobalMapPath(spec *volume.Spec) (string, error) {
 func (disk *dataDisk) GetPodDeviceMapPath() (string, string) {
 	name := azureDataDiskPluginName
 	return disk.plugin.host.GetPodVolumeDeviceDir(disk.podUID, utilstrings.EscapeQualifiedName(name)), disk.volumeName
+}
+
+// SupportsMetrics returns true for azureDataDiskMapper as it initializes the
+// MetricsProvider.
+func (addm *azureDataDiskMapper) SupportsMetrics() bool {
+	return true
 }

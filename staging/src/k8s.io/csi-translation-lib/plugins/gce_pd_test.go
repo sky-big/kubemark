@@ -303,19 +303,31 @@ func TestTranslateInTreePVToCSIVolIDFmt(t *testing.T) {
 		desc               string
 		topologyLabelKey   string
 		topologyLabelValue string
-		wantVolID          string
+		wantVolId          string
 	}{
 		{
 			desc:               "beta topology key zonal",
 			topologyLabelKey:   v1.LabelFailureDomainBetaZone,
 			topologyLabelValue: "us-east1-a",
-			wantVolID:          "projects/UNSPECIFIED/zones/us-east1-a/disks/pd-name",
+			wantVolId:          "projects/UNSPECIFIED/zones/us-east1-a/disks/pd-name",
+		},
+		{
+			desc:               "v1 topology key zonal",
+			topologyLabelKey:   v1.LabelTopologyZone,
+			topologyLabelValue: "us-east1-a",
+			wantVolId:          "projects/UNSPECIFIED/zones/us-east1-a/disks/pd-name",
 		},
 		{
 			desc:               "beta topology key regional",
 			topologyLabelKey:   v1.LabelFailureDomainBetaZone,
 			topologyLabelValue: "us-central1-a__us-central1-c",
-			wantVolID:          "projects/UNSPECIFIED/regions/us-central1/disks/pd-name",
+			wantVolId:          "projects/UNSPECIFIED/regions/us-central1/disks/pd-name",
+		},
+		{
+			desc:               "v1 topology key regional",
+			topologyLabelKey:   v1.LabelTopologyZone,
+			topologyLabelValue: "us-central1-a__us-central1-c",
+			wantVolId:          "projects/UNSPECIFIED/regions/us-central1/disks/pd-name",
 		},
 	}
 	for _, tc := range tests {
@@ -335,8 +347,8 @@ func TestTranslateInTreePVToCSIVolIDFmt(t *testing.T) {
 			if err != nil {
 				t.Errorf("got error translating in-tree PV to CSI: %v", err)
 			}
-			if got := translatedPV.Spec.PersistentVolumeSource.CSI.VolumeHandle; got != tc.wantVolID {
-				t.Errorf("got translated volume handle: %q, want %q", got, tc.wantVolID)
+			if got := translatedPV.Spec.PersistentVolumeSource.CSI.VolumeHandle; got != tc.wantVolId {
+				t.Errorf("got translated volume handle: %q, want %q", got, tc.wantVolId)
 			}
 		})
 	}

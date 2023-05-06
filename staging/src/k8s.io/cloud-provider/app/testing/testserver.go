@@ -25,7 +25,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/spf13/pflag"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
@@ -59,8 +58,9 @@ type Logger interface {
 // and location of the tmpdir are returned.
 //
 // Note: we return a tear-down func instead of a stop channel because the later will leak temporary
-// 		 files that because Golang testing's call to os.Exit will not give a stop channel go routine
-// 		 enough time to remove temporary files.
+//
+//	files that because Golang testing's call to os.Exit will not give a stop channel go routine
+//	enough time to remove temporary files.
 func StartTestServer(t Logger, customFlags []string) (result TestServer, err error) {
 	stopCh := make(chan struct{})
 	configDoneCh := make(chan struct{})
@@ -104,22 +104,15 @@ func StartTestServer(t Logger, customFlags []string) (result TestServer, err err
 	}
 	fss := cliflag.NamedFlagSets{}
 	command := app.NewCloudControllerManagerCommand(s, cloudInitializer, app.DefaultInitFuncConstructors, fss, stopCh)
-	pflag.CommandLine.SetNormalizeFunc(cliflag.WordSepNormalizeFunc)
 
 	commandArgs := []string{}
 	listeners := []net.Listener{}
-	disableInsecure := false
 	disableSecure := false
 	for _, arg := range customFlags {
 		if strings.HasPrefix(arg, "--secure-port=") {
 			if arg == "--secure-port=0" {
 				commandArgs = append(commandArgs, arg)
 				disableSecure = true
-			}
-		} else if strings.HasPrefix(arg, "--port=") {
-			if arg == "--port=0" {
-				commandArgs = append(commandArgs, arg)
-				disableInsecure = true
 			}
 		} else if strings.HasPrefix(arg, "--cert-dir=") {
 			// skip it
@@ -136,16 +129,6 @@ func StartTestServer(t Logger, customFlags []string) (result TestServer, err err
 		listeners = append(listeners, listener)
 		commandArgs = append(commandArgs, fmt.Sprintf("--secure-port=%d", bindPort))
 		commandArgs = append(commandArgs, fmt.Sprintf("--cert-dir=%s", result.TmpDir))
-
-		t.Logf("cloud-controller-manager will listen securely on port %d...", bindPort)
-	}
-	if !disableInsecure {
-		listener, bindPort, err := createListenerOnFreePort()
-		if err != nil {
-			return result, fmt.Errorf("failed to create listener: %v", err)
-		}
-		listeners = append(listeners, listener)
-		commandArgs = append(commandArgs, fmt.Sprintf("--port=%d", bindPort))
 
 		t.Logf("cloud-controller-manager will listen securely on port %d...", bindPort)
 	}

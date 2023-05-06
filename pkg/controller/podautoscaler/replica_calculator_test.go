@@ -17,12 +17,13 @@ limitations under the License.
 package podautoscaler
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"testing"
 	"time"
 
-	autoscalingv2 "k8s.io/api/autoscaling/v2beta2"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta/testrestmapper"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -359,7 +360,7 @@ func (tc *replicaCalcTestCase) runTest(t *testing.T) {
 	}
 
 	if tc.resource != nil {
-		outReplicas, outUtilization, outRawValue, outTimestamp, err := replicaCalc.GetResourceReplicas(tc.currentReplicas, tc.resource.targetUtilization, tc.resource.name, testNamespace, selector, tc.container)
+		outReplicas, outUtilization, outRawValue, outTimestamp, err := replicaCalc.GetResourceReplicas(context.TODO(), tc.currentReplicas, tc.resource.targetUtilization, tc.resource.name, testNamespace, selector, tc.container)
 
 		if tc.expectedError != nil {
 			require.Error(t, err, "there should be an error calculating the replica count")
@@ -1476,6 +1477,22 @@ func TestReplicaCalcDuringRollingUpdateWithMaxSurge(t *testing.T) {
 			targetUtilization:   50,
 			expectedUtilization: 10,
 			expectedValue:       numContainersPerPod * 100,
+		},
+	}
+	tc.runTest(t)
+}
+
+func TestReplicaCalcDuringRollingUpdateWithMaxSurgeCM(t *testing.T) {
+	tc := replicaCalcTestCase{
+		currentReplicas:  2,
+		expectedReplicas: 2,
+		podPhase:         []v1.PodPhase{v1.PodRunning, v1.PodRunning, v1.PodRunning},
+		metric: &metricInfo{
+			name:                "qps",
+			levels:              []int64{10000, 10000},
+			targetUtilization:   17000,
+			expectedUtilization: 10000,
+			metricType:          podMetric,
 		},
 	}
 	tc.runTest(t)

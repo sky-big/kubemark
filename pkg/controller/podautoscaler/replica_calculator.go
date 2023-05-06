@@ -17,11 +17,12 @@ limitations under the License.
 package podautoscaler
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"time"
 
-	autoscaling "k8s.io/api/autoscaling/v2beta2"
+	autoscaling "k8s.io/api/autoscaling/v2"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -61,8 +62,8 @@ func NewReplicaCalculator(metricsClient metricsclient.MetricsClient, podLister c
 
 // GetResourceReplicas calculates the desired replica count based on a target resource utilization percentage
 // of the given resource for pods matching the given selector in the given namespace, and the current replica count
-func (c *ReplicaCalculator) GetResourceReplicas(currentReplicas int32, targetUtilization int32, resource v1.ResourceName, namespace string, selector labels.Selector, container string) (replicaCount int32, utilization int32, rawUtilization int64, timestamp time.Time, err error) {
-	metrics, timestamp, err := c.metricsClient.GetResourceMetric(resource, namespace, selector, container)
+func (c *ReplicaCalculator) GetResourceReplicas(ctx context.Context, currentReplicas int32, targetUtilization int32, resource v1.ResourceName, namespace string, selector labels.Selector, container string) (replicaCount int32, utilization int32, rawUtilization int64, timestamp time.Time, err error) {
+	metrics, timestamp, err := c.metricsClient.GetResourceMetric(ctx, resource, namespace, selector, container)
 	if err != nil {
 		return 0, 0, 0, time.Time{}, fmt.Errorf("unable to get metrics for resource %s: %v", resource, err)
 	}
@@ -150,8 +151,8 @@ func (c *ReplicaCalculator) GetResourceReplicas(currentReplicas int32, targetUti
 
 // GetRawResourceReplicas calculates the desired replica count based on a target resource utilization (as a raw milli-value)
 // for pods matching the given selector in the given namespace, and the current replica count
-func (c *ReplicaCalculator) GetRawResourceReplicas(currentReplicas int32, targetUtilization int64, resource v1.ResourceName, namespace string, selector labels.Selector, container string) (replicaCount int32, utilization int64, timestamp time.Time, err error) {
-	metrics, timestamp, err := c.metricsClient.GetResourceMetric(resource, namespace, selector, container)
+func (c *ReplicaCalculator) GetRawResourceReplicas(ctx context.Context, currentReplicas int32, targetUtilization int64, resource v1.ResourceName, namespace string, selector labels.Selector, container string) (replicaCount int32, utilization int64, timestamp time.Time, err error) {
+	metrics, timestamp, err := c.metricsClient.GetResourceMetric(ctx, resource, namespace, selector, container)
 	if err != nil {
 		return 0, 0, time.Time{}, fmt.Errorf("unable to get metrics for resource %s: %v", resource, err)
 	}
@@ -237,15 +238,21 @@ func (c *ReplicaCalculator) calcPlainMetricReplicas(metrics metricsclient.PodMet
 		return currentReplicas, utilization, nil
 	}
 
+	newReplicas := int32(math.Ceil(newUsageRatio * float64(len(metrics))))
+	if (newUsageRatio < 1.0 && newReplicas > currentReplicas) || (newUsageRatio > 1.0 && newReplicas < currentReplicas) {
+		// return the current replicas if the change of metrics length would cause a change in scale direction
+		return currentReplicas, utilization, nil
+	}
+
 	// return the result, where the number of replicas considered is
 	// however many replicas factored into our calculation
-	return int32(math.Ceil(newUsageRatio * float64(len(metrics)))), utilization, nil
+	return newReplicas, utilization, nil
 }
 
 // GetObjectMetricReplicas calculates the desired replica count based on a target metric utilization (as a milli-value)
 // for the given object in the given namespace, and the current replica count.
 func (c *ReplicaCalculator) GetObjectMetricReplicas(currentReplicas int32, targetUtilization int64, metricName string, namespace string, objectRef *autoscaling.CrossVersionObjectReference, selector labels.Selector, metricSelector labels.Selector) (replicaCount int32, utilization int64, timestamp time.Time, err error) {
-	utilization, timestamp, err = c.metricsClient.GetObjectMetric(metricName, namespace, objectRef, metricSelector)
+	utilization, _, err = c.metricsClient.GetObjectMetric(metricName, namespace, objectRef, metricSelector)
 	if err != nil {
 		return 0, 0, time.Time{}, fmt.Errorf("unable to get metric %s: %v on %s %s/%s", metricName, objectRef.Kind, namespace, objectRef.Name, err)
 	}
@@ -327,7 +334,7 @@ func (c *ReplicaCalculator) GetExternalMetricReplicas(currentReplicas int32, tar
 	if err != nil {
 		return 0, 0, time.Time{}, err
 	}
-	metrics, timestamp, err := c.metricsClient.GetExternalMetric(metricName, namespace, metricLabelSelector)
+	metrics, _, err := c.metricsClient.GetExternalMetric(metricName, namespace, metricLabelSelector)
 	if err != nil {
 		return 0, 0, time.Time{}, fmt.Errorf("unable to get external metric %s/%s/%+v: %s", namespace, metricName, metricSelector, err)
 	}

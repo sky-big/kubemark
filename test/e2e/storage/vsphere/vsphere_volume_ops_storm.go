@@ -24,7 +24,7 @@ import (
 
 	"github.com/onsi/ginkgo"
 	"github.com/onsi/gomega"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"
@@ -33,6 +33,7 @@ import (
 	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	"k8s.io/kubernetes/test/e2e/storage/utils"
+	admissionapi "k8s.io/pod-security-admission/api"
 )
 
 /*
@@ -53,6 +54,7 @@ import (
 
 var _ = utils.SIGDescribe("Volume Operations Storm [Feature:vsphere]", func() {
 	f := framework.NewDefaultFramework("volume-ops-storm")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	const defaultVolumeOpsScale = 30
 	var (
 		client            clientset.Interface
@@ -104,7 +106,7 @@ var _ = utils.SIGDescribe("Volume Operations Storm [Feature:vsphere]", func() {
 		}
 
 		ginkgo.By("Waiting for all claims to be in bound phase")
-		persistentvolumes, err = e2epv.WaitForPVClaimBoundPhase(client, pvclaims, framework.ClaimProvisionTimeout)
+		persistentvolumes, err = e2epv.WaitForPVClaimBoundPhase(client, pvclaims, f.Timeouts.ClaimProvision)
 		framework.ExpectNoError(err)
 
 		ginkgo.By("Creating pod to attach PVs to the node")

@@ -69,3 +69,37 @@ func TestUtils(t *testing.T) {
 		t.Errorf("unexpected error: %s", err)
 	}
 }
+
+func TestIsvCenterDeprecated(t *testing.T) {
+	type testsData struct {
+		vcVersion    string
+		vcAPIVersion string
+		isDeprecated bool
+	}
+	testdataArray := []testsData{
+		{"8.0.0", "8.0.0.0", false},
+		{"7.0.3", "7.0.3.0", false},
+		{"7.0.2", "7.0.2.0", false},
+		{"7.0.1", "7.0.1.1", true},
+		{"7.0.0", "7.0.0.0", true},
+		{"6.7.0", "6.7.3", true},
+		{"6.7.0", "6.7", true},
+		{"6.7.0", "6.7.2", true},
+		{"6.7.0", "6.7.1", true},
+		{"6.5.0", "6.5", true},
+	}
+
+	for _, test := range testdataArray {
+		deprecated, err := isvCenterDeprecated(test.vcVersion, test.vcAPIVersion)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if deprecated != test.isDeprecated {
+			t.Fatalf("deprecation test failed for vc version: %q and vc API version: %q",
+				test.vcVersion, test.vcAPIVersion)
+		} else {
+			t.Logf("deprecation test for vc version: %q and vc API version: %q passed. Is Deprecated : %v",
+				test.vcAPIVersion, test.vcAPIVersion, deprecated)
+		}
+	}
+}

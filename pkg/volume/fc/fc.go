@@ -26,6 +26,7 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/mount-utils"
 	utilexec "k8s.io/utils/exec"
+	"k8s.io/utils/io"
 	utilstrings "k8s.io/utils/strings"
 
 	v1 "k8s.io/api/core/v1"
@@ -171,7 +172,7 @@ func (plugin *fcPlugin) newBlockVolumeMapperInternal(spec *volume.Spec, podUID t
 		return nil, fmt.Errorf("fc: no fc disk information found. failed to make a new mapper")
 	}
 
-	return &fcDiskMapper{
+	mapper := &fcDiskMapper{
 		fcDisk: &fcDisk{
 			podUID:  podUID,
 			volName: spec.Name(),
@@ -184,7 +185,15 @@ func (plugin *fcPlugin) newBlockVolumeMapperInternal(spec *volume.Spec, podUID t
 		readOnly:   readOnly,
 		mounter:    &mount.SafeFormatAndMount{Interface: mounter, Exec: exec},
 		deviceUtil: util.NewDeviceHandler(util.NewIOHandler()),
-	}, nil
+	}
+
+	blockPath, err := mapper.GetGlobalMapPath(spec)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get device path: %v", err)
+	}
+	mapper.MetricsProvider = volume.NewMetricsBlock(filepath.Join(blockPath, string(podUID)))
+
+	return mapper, nil
 }
 
 func (plugin *fcPlugin) NewUnmounter(volName string, podUID types.UID) (volume.Unmounter, error) {
@@ -231,8 +240,18 @@ func (plugin *fcPlugin) ConstructVolumeSpec(volumeName, mountPath string) (*volu
 	//   mountPath:     pods/{podUid}/volumes/kubernetes.io~fc/{volumeName}
 	//   globalPDPath : plugins/kubernetes.io/fc/50060e801049cfd1-lun-0
 	var globalPDPath string
+
 	mounter := plugin.host.GetMounter(plugin.GetPluginName())
-	paths, err := mounter.GetMountRefs(mountPath)
+	// Try really hard to get the global mount of the volume, an error returned from here would
+	// leave the global mount still mounted, while marking the volume as unused.
+	// The volume can then be mounted on several nodes, resulting in volume
+	// corruption.
+	paths, err := util.GetReliableMountRefs(mounter, mountPath)
+	if io.IsInconsistentReadError(err) {
+		klog.Errorf("Failed to read mount refs from /proc/mounts for %s: %s", mountPath, err)
+		klog.Errorf("Kubelet cannot unmount volume at %s, please unmount it manually", mountPath)
+		return nil, err
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -267,9 +286,11 @@ func (plugin *fcPlugin) ConstructVolumeSpec(volumeName, mountPath string) (*volu
 //   - Searches a file whose name is {pod uuid} under volume plugin directory.
 //   - If a file is found, then retreives volumePluginDependentPath from globalMapPathUUID.
 //   - Once volumePluginDependentPath is obtained, store volume information to VolumeSource
+//
 // examples:
-//   mapPath: pods/{podUid}/{DefaultKubeletVolumeDevicesDirName}/{escapeQualifiedPluginName}/{volumeName}
-//   globalMapPathUUID : plugins/kubernetes.io/{PluginName}/{DefaultKubeletVolumeDevicesDirName}/{volumePluginDependentPath}/{pod uuid}
+//
+//	mapPath: pods/{podUid}/{DefaultKubeletVolumeDevicesDirName}/{escapeQualifiedPluginName}/{volumeName}
+//	globalMapPathUUID : plugins/kubernetes.io/{PluginName}/{DefaultKubeletVolumeDevicesDirName}/{volumePluginDependentPath}/{pod uuid}
 func (plugin *fcPlugin) ConstructBlockVolumeSpec(podUID types.UID, volumeName, mapPath string) (*volume.Spec, error) {
 	pluginDir := plugin.host.GetVolumeDevicePluginDir(fcPluginName)
 	blkutil := volumepathhandler.NewBlockVolumePathHandler()
@@ -345,17 +366,10 @@ var _ volume.Mounter = &fcDiskMounter{}
 
 func (b *fcDiskMounter) GetAttributes() volume.Attributes {
 	return volume.Attributes{
-		ReadOnly:        b.readOnly,
-		Managed:         !b.readOnly,
-		SupportsSELinux: true,
+		ReadOnly:       b.readOnly,
+		Managed:        !b.readOnly,
+		SELinuxRelabel: true,
 	}
-}
-
-// Checks prior to mount operations to verify that the required components (binaries, etc.)
-// to mount the volume are available on the underlying node.
-// If not, it returns an error
-func (b *fcDiskMounter) CanMount() error {
-	return nil
 }
 
 func (b *fcDiskMounter) SetUp(mounterArgs volume.MounterArgs) error {
@@ -364,7 +378,7 @@ func (b *fcDiskMounter) SetUp(mounterArgs volume.MounterArgs) error {
 
 func (b *fcDiskMounter) SetUpAt(dir string, mounterArgs volume.MounterArgs) error {
 	// diskSetUp checks mountpoints and prevent repeated calls
-	err := diskSetUp(b.manager, *b, dir, b.mounter, mounterArgs.FsGroup, mounterArgs.FSGroupChangePolicy, b.plugin)
+	err := diskSetUp(b.manager, *b, dir, b.mounter, mounterArgs.FsGroup, mounterArgs.FSGroupChangePolicy)
 	if err != nil {
 		klog.Errorf("fc: failed to setup")
 	}
@@ -393,6 +407,7 @@ func (c *fcDiskUnmounter) TearDownAt(dir string) error {
 // Block Volumes Support
 type fcDiskMapper struct {
 	*fcDisk
+	volume.MetricsProvider
 	readOnly   bool
 	mounter    mount.Interface
 	deviceUtil util.DeviceUtil

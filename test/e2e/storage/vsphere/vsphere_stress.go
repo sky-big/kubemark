@@ -23,7 +23,7 @@ import (
 
 	"github.com/onsi/ginkgo"
 	"github.com/onsi/gomega"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"
@@ -33,20 +33,22 @@ import (
 	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	"k8s.io/kubernetes/test/e2e/storage/utils"
+	admissionapi "k8s.io/pod-security-admission/api"
 )
 
 /*
-	Induce stress to create volumes in parallel with multiple threads based on user configurable values for number of threads and iterations per thread.
-	The following actions will be performed as part of this test.
+Induce stress to create volumes in parallel with multiple threads based on user configurable values for number of threads and iterations per thread.
+The following actions will be performed as part of this test.
 
-	1. Create Storage Classes of 4 Categories (Default, SC with Non Default Datastore, SC with SPBM Policy, SC with VSAN Storage Capabilities.)
-	2. READ VCP_STRESS_INSTANCES, VCP_STRESS_ITERATIONS, VSPHERE_SPBM_POLICY_NAME and VSPHERE_DATASTORE from System Environment.
-	3. Launch goroutine for volume lifecycle operations.
-	4. Each instance of routine iterates for n times, where n is read from system env - VCP_STRESS_ITERATIONS
-	5. Each iteration creates 1 PVC, 1 POD using the provisioned PV, Verify disk is attached to the node, Verify pod can access the volume, delete the pod and finally delete the PVC.
+1. Create Storage Classes of 4 Categories (Default, SC with Non Default Datastore, SC with SPBM Policy, SC with VSAN Storage Capabilities.)
+2. READ VCP_STRESS_INSTANCES, VCP_STRESS_ITERATIONS, VSPHERE_SPBM_POLICY_NAME and VSPHERE_DATASTORE from System Environment.
+3. Launch goroutine for volume lifecycle operations.
+4. Each instance of routine iterates for n times, where n is read from system env - VCP_STRESS_ITERATIONS
+5. Each iteration creates 1 PVC, 1 POD using the provisioned PV, Verify disk is attached to the node, Verify pod can access the volume, delete the pod and finally delete the PVC.
 */
 var _ = utils.SIGDescribe("vsphere cloud provider stress [Feature:vsphere]", func() {
 	f := framework.NewDefaultFramework("vcp-stress")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	var (
 		client        clientset.Interface
 		namespace     string
@@ -140,7 +142,7 @@ func PerformVolumeLifeCycleInParallel(f *framework.Framework, client clientset.I
 		var pvclaims []*v1.PersistentVolumeClaim
 		pvclaims = append(pvclaims, pvclaim)
 		ginkgo.By(fmt.Sprintf("%v Waiting for claim: %v to be in bound phase", logPrefix, pvclaim.Name))
-		persistentvolumes, err := e2epv.WaitForPVClaimBoundPhase(client, pvclaims, framework.ClaimProvisionTimeout)
+		persistentvolumes, err := e2epv.WaitForPVClaimBoundPhase(client, pvclaims, f.Timeouts.ClaimProvision)
 		framework.ExpectNoError(err)
 
 		ginkgo.By(fmt.Sprintf("%v Creating Pod using the claim: %v", logPrefix, pvclaim.Name))
@@ -149,7 +151,7 @@ func PerformVolumeLifeCycleInParallel(f *framework.Framework, client clientset.I
 		framework.ExpectNoError(err)
 
 		ginkgo.By(fmt.Sprintf("%v Waiting for the Pod: %v to be in the running state", logPrefix, pod.Name))
-		err = e2epod.WaitForPodRunningInNamespaceSlow(f.ClientSet, pod.Name, f.Namespace.Name)
+		err = e2epod.WaitTimeoutForPodRunningInNamespace(f.ClientSet, pod.Name, f.Namespace.Name, f.Timeouts.PodStartSlow)
 		framework.ExpectNoError(err)
 
 		// Get the copy of the Pod to know the assigned node name.

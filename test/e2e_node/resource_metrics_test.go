@@ -25,6 +25,7 @@ import (
 	e2ekubectl "k8s.io/kubernetes/test/e2e/framework/kubectl"
 	e2emetrics "k8s.io/kubernetes/test/e2e/framework/metrics"
 	e2evolume "k8s.io/kubernetes/test/e2e/framework/volume"
+	admissionapi "k8s.io/pod-security-admission/api"
 
 	"github.com/prometheus/common/model"
 
@@ -40,8 +41,9 @@ const (
 	maxStatsAge = time.Minute
 )
 
-var _ = framework.KubeDescribe("ResourceMetricsAPI [NodeFeature:ResourceMetrics]", func() {
+var _ = SIGDescribe("ResourceMetricsAPI [NodeFeature:ResourceMetrics]", func() {
 	f := framework.NewDefaultFramework("resource-metrics")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	ginkgo.Context("when querying /resource/metrics", func() {
 		ginkgo.BeforeEach(func() {
 			ginkgo.By("Creating test pods to measure their resource usage")
@@ -86,6 +88,11 @@ var _ = framework.KubeDescribe("ResourceMetricsAPI [NodeFeature:ResourceMetrics]
 				"container_memory_working_set_bytes": gstruct.MatchElements(containerID, gstruct.IgnoreExtras, gstruct.Elements{
 					fmt.Sprintf("%s::%s::%s", f.Namespace.Name, pod0, "busybox-container"): boundedSample(10*e2evolume.Kb, 80*e2evolume.Mb),
 					fmt.Sprintf("%s::%s::%s", f.Namespace.Name, pod1, "busybox-container"): boundedSample(10*e2evolume.Kb, 80*e2evolume.Mb),
+				}),
+
+				"container_start_time_seconds": gstruct.MatchElements(containerID, gstruct.IgnoreExtras, gstruct.Elements{
+					fmt.Sprintf("%s::%s::%s", f.Namespace.Name, pod0, "busybox-container"): boundedSample(time.Now().Add(-maxStatsAge).Unix(), time.Now().Add(2*time.Minute).Unix()),
+					fmt.Sprintf("%s::%s::%s", f.Namespace.Name, pod1, "busybox-container"): boundedSample(time.Now().Add(-maxStatsAge).Unix(), time.Now().Add(2*time.Minute).Unix()),
 				}),
 
 				"pod_cpu_usage_seconds_total": gstruct.MatchElements(podID, gstruct.IgnoreExtras, gstruct.Elements{

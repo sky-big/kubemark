@@ -18,21 +18,30 @@ package windows
 
 import (
 	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/onsi/ginkgo"
+	"github.com/onsi/gomega"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/util/uuid"
+	clientset "k8s.io/client-go/kubernetes"
+	"k8s.io/kubernetes/pkg/kubelet/events"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	testutils "k8s.io/kubernetes/test/utils"
 	imageutils "k8s.io/kubernetes/test/utils/image"
-
-	"github.com/onsi/ginkgo"
+	admissionapi "k8s.io/pod-security-admission/api"
 )
 
 const runAsUserNameContainerName = "run-as-username-container"
 
 var _ = SIGDescribe("[Feature:Windows] SecurityContext", func() {
 	f := framework.NewDefaultFramework("windows-run-as-username")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 
 	ginkgo.It("should be able create pods and run containers with a given username", func() {
 		ginkgo.By("Creating 2 pods: 1 with the default user, and one with a custom one.")
@@ -43,9 +52,58 @@ var _ = SIGDescribe("[Feature:Windows] SecurityContext", func() {
 		f.TestContainerOutput("check set user", podUserName, 0, []string{"ContainerAdministrator"})
 	})
 
-	ginkgo.It("should not be able to create pods with unknown usernames", func() {
+	ginkgo.It("should not be able to create pods with unknown usernames at Pod level", func() {
 		ginkgo.By("Creating a pod with an invalid username")
 		podInvalid := f.PodClient().Create(runAsUserNamePod(toPtr("FooLish")))
+
+		failedSandboxEventSelector := fields.Set{
+			"involvedObject.kind":      "Pod",
+			"involvedObject.name":      podInvalid.Name,
+			"involvedObject.namespace": podInvalid.Namespace,
+			"reason":                   events.FailedCreatePodSandBox,
+		}.AsSelector().String()
+		hcsschimError := "The user name or password is incorrect."
+
+		// Hostprocess updated the cri to pass RunAsUserName to sandbox: https://github.com/kubernetes/kubernetes/pull/99576/commits/51a02fdb80cb7ba042a66362eb76facd2fd82401
+		// Some runtimes might use that and set the username on the podsandbox. Containerd 1.6+ is known to do this.
+		// If there is an error when creating the pod sandbox then the pod stays in pending state by design
+		// See https://github.com/kubernetes/kubernetes/issues/104635
+		// Not all runtimes use the sandbox information.  This means the test needs to check if the pod
+		// sandbox failed or workload pod failed.
+		framework.Logf("Waiting for pod %s to enter the error state.", podInvalid.Name)
+		gomega.Eventually(func() bool {
+			failedSandbox, err := eventOccurred(f.ClientSet, podInvalid.Namespace, failedSandboxEventSelector, hcsschimError)
+			if err != nil {
+				framework.Logf("Error retrieving events for pod. Ignoring...")
+			}
+			if failedSandbox {
+				framework.Logf("Found Expected Event 'Failed to Create Pod Sandbox' with message containing: %s", hcsschimError)
+				return true
+			}
+
+			framework.Logf("No Sandbox error found. Looking for failure in workload pods")
+			pod, err := f.PodClient().Get(context.Background(), podInvalid.Name, metav1.GetOptions{})
+			if err != nil {
+				framework.Logf("Error retrieving pod: %s", err)
+				return false
+			}
+
+			podTerminatedReason := testutils.TerminatedContainers(pod)[runAsUserNameContainerName]
+			podFailedToStart := podTerminatedReason == "ContainerCannotRun" || podTerminatedReason == "StartError"
+			if pod.Status.Phase == v1.PodFailed && podFailedToStart {
+				framework.Logf("Found terminated workload Pod that could not start")
+				return true
+			}
+
+			return false
+		}, framework.PodStartTimeout, 1*time.Second).Should(gomega.BeTrue())
+	})
+
+	ginkgo.It("should not be able to create pods with unknown usernames at Container level", func() {
+		ginkgo.By("Creating a pod with an invalid username at container level and pod running as ContainerUser")
+		p := runAsUserNamePod(toPtr("FooLish"))
+		p.Spec.SecurityContext.WindowsOptions.RunAsUserName = toPtr("ContainerUser")
+		podInvalid := f.PodClient().Create(p)
 
 		framework.Logf("Waiting for pod %s to enter the error state.", podInvalid.Name)
 		framework.ExpectNoError(e2epod.WaitForPodTerminatedInNamespace(f.ClientSet, podInvalid.Name, "", f.Namespace.Name))
@@ -71,6 +129,7 @@ var _ = SIGDescribe("[Feature:Windows] SecurityContext", func() {
 		f.TestContainerOutput("check overridden username", pod, 0, []string{"ContainerUser"})
 		f.TestContainerOutput("check pod SecurityContext username", pod, 1, []string{"ContainerAdministrator"})
 	})
+
 	ginkgo.It("should ignore Linux Specific SecurityContext if set", func() {
 		ginkgo.By("Creating a pod with SELinux options")
 		// It is sufficient to show that the pod comes up here. Since we're stripping the SELinux and other linux
@@ -93,6 +152,42 @@ var _ = SIGDescribe("[Feature:Windows] SecurityContext", func() {
 		framework.Logf("Created pod %v", windowsPodWithSELinux)
 		framework.ExpectNoError(e2epod.WaitForPodNameRunningInNamespace(f.ClientSet, windowsPodWithSELinux.Name,
 			f.Namespace.Name), "failed to wait for pod %s to be running", windowsPodWithSELinux.Name)
+	})
+
+	ginkgo.It("should not be able to create pods with containers running as ContainerAdministrator when runAsNonRoot is true", func() {
+		ginkgo.By("Creating a pod")
+
+		p := runAsUserNamePod(toPtr("ContainerAdministrator"))
+		p.Spec.SecurityContext.RunAsNonRoot = &trueVar
+
+		podInvalid, err := f.ClientSet.CoreV1().Pods(f.Namespace.Name).Create(context.TODO(), p, metav1.CreateOptions{})
+		framework.ExpectNoError(err, "Error creating pod")
+
+		ginkgo.By("Waiting for pod to finish")
+		event, err := f.PodClient().WaitForErrorEventOrSuccess(podInvalid)
+		framework.ExpectNoError(err)
+		framework.ExpectNotEqual(event, nil, "event should not be empty")
+		framework.Logf("Got event: %v", event)
+		expectedEventError := "container's runAsUserName (ContainerAdministrator) which will be regarded as root identity and will break non-root policy"
+		framework.ExpectEqual(true, strings.Contains(event.Message, expectedEventError), "Event error should indicate non-root policy caused container to not start")
+	})
+
+	ginkgo.It("should not be able to create pods with containers running as CONTAINERADMINISTRATOR when runAsNonRoot is true", func() {
+		ginkgo.By("Creating a pod")
+
+		p := runAsUserNamePod(toPtr("CONTAINERADMINISTRATOR"))
+		p.Spec.SecurityContext.RunAsNonRoot = &trueVar
+
+		podInvalid, err := f.ClientSet.CoreV1().Pods(f.Namespace.Name).Create(context.TODO(), p, metav1.CreateOptions{})
+		framework.ExpectNoError(err, "Error creating pod")
+
+		ginkgo.By("Waiting for pod to finish")
+		event, err := f.PodClient().WaitForErrorEventOrSuccess(podInvalid)
+		framework.ExpectNoError(err)
+		framework.ExpectNotEqual(event, nil, "event should not be empty")
+		framework.Logf("Got event: %v", event)
+		expectedEventError := "container's runAsUserName (CONTAINERADMINISTRATOR) which will be regarded as root identity and will break non-root policy"
+		framework.ExpectEqual(true, strings.Contains(event.Message, expectedEventError), "Event error should indicate non-root policy caused container to not start")
 	})
 })
 
@@ -128,4 +223,19 @@ func runAsUserNamePod(username *string) *v1.Pod {
 
 func toPtr(s string) *string {
 	return &s
+}
+
+func eventOccurred(c clientset.Interface, namespace, eventSelector, msg string) (bool, error) {
+	options := metav1.ListOptions{FieldSelector: eventSelector}
+
+	events, err := c.CoreV1().Events(namespace).List(context.TODO(), options)
+	if err != nil {
+		return false, fmt.Errorf("got error while getting events: %v", err)
+	}
+	for _, event := range events.Items {
+		if strings.Contains(event.Message, msg) {
+			return true, nil
+		}
+	}
+	return false, nil
 }

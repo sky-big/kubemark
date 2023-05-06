@@ -23,18 +23,18 @@ import (
 	"golang.org/x/time/rate"
 
 	v1 "k8s.io/api/core/v1"
-	discovery "k8s.io/api/discovery/v1beta1"
+	discovery "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	coreinformers "k8s.io/client-go/informers/core/v1"
-	discoveryinformers "k8s.io/client-go/informers/discovery/v1beta1"
+	discoveryinformers "k8s.io/client-go/informers/discovery/v1"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
-	discoverylisters "k8s.io/client-go/listers/discovery/v1beta1"
+	discoverylisters "k8s.io/client-go/listers/discovery/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
@@ -42,6 +42,7 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/controller"
 	"k8s.io/kubernetes/pkg/controller/endpointslicemirroring/metrics"
+	endpointsliceutil "k8s.io/kubernetes/pkg/controller/util/endpointslice"
 )
 
 const (
@@ -79,7 +80,7 @@ func NewController(endpointsInformer coreinformers.EndpointsInformer,
 	recorder := broadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "endpoint-slice-mirroring-controller"})
 
 	if client != nil && client.CoreV1().RESTClient().GetRateLimiter() != nil {
-		ratelimiter.RegisterMetricAndTrackRateLimiterUsage("endpoint_slice_mirroring_controller", client.DiscoveryV1beta1().RESTClient().GetRateLimiter())
+		ratelimiter.RegisterMetricAndTrackRateLimiterUsage("endpoint_slice_mirroring_controller", client.DiscoveryV1().RESTClient().GetRateLimiter())
 	}
 
 	metrics.RegisterMetrics()
@@ -116,7 +117,7 @@ func NewController(endpointsInformer coreinformers.EndpointsInformer,
 
 	c.endpointSliceLister = endpointSliceInformer.Lister()
 	c.endpointSlicesSynced = endpointSliceInformer.Informer().HasSynced
-	c.endpointSliceTracker = newEndpointSliceTracker()
+	c.endpointSliceTracker = endpointsliceutil.NewEndpointSliceTracker()
 
 	c.serviceLister = serviceInformer.Lister()
 	c.servicesSynced = serviceInformer.Informer().HasSynced
@@ -169,7 +170,7 @@ type Controller struct {
 	// endpointSliceTracker tracks the list of EndpointSlices and associated
 	// resource versions expected for each Endpoints resource. It can help
 	// determine if a cached EndpointSlice is out of date.
-	endpointSliceTracker *endpointSliceTracker
+	endpointSliceTracker *endpointsliceutil.EndpointSliceTracker
 
 	// serviceLister is able to list/get services and is populated by the shared
 	// informer passed to NewController.
@@ -316,7 +317,7 @@ func (c *Controller) syncEndpoints(key string) error {
 	}
 
 	if c.endpointSliceTracker.StaleSlices(svc, endpointSlices) {
-		return &StaleInformerCache{"EndpointSlice informer cache is out of date"}
+		return endpointsliceutil.NewStaleInformerCache("EndpointSlice informer cache is out of date")
 	}
 
 	err = c.reconciler.reconcile(endpoints, endpointSlices)

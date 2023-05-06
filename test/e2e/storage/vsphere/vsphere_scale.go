@@ -33,17 +33,18 @@ import (
 	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	"k8s.io/kubernetes/test/e2e/storage/utils"
+	admissionapi "k8s.io/pod-security-admission/api"
 )
 
 /*
-	Perform vsphere volume life cycle management at scale based on user configurable value for number of volumes.
-	The following actions will be performed as part of this test.
+Perform vsphere volume life cycle management at scale based on user configurable value for number of volumes.
+The following actions will be performed as part of this test.
 
-	1. Create Storage Classes of 4 Categories (Default, SC with Non Default Datastore, SC with SPBM Policy, SC with VSAN Storage Capabilities.)
-	2. Read VCP_SCALE_VOLUME_COUNT, VCP_SCALE_INSTANCES, VCP_SCALE_VOLUMES_PER_POD, VSPHERE_SPBM_POLICY_NAME, VSPHERE_DATASTORE from System Environment.
-	3. Launch VCP_SCALE_INSTANCES goroutine for creating VCP_SCALE_VOLUME_COUNT volumes. Each goroutine is responsible for create/attach of VCP_SCALE_VOLUME_COUNT/VCP_SCALE_INSTANCES volumes.
-	4. Read VCP_SCALE_VOLUMES_PER_POD from System Environment. Each pod will be have VCP_SCALE_VOLUMES_PER_POD attached to it.
-	5. Once all the go routines are completed, we delete all the pods and volumes.
+1. Create Storage Classes of 4 Categories (Default, SC with Non Default Datastore, SC with SPBM Policy, SC with VSAN Storage Capabilities.)
+2. Read VCP_SCALE_VOLUME_COUNT, VCP_SCALE_INSTANCES, VCP_SCALE_VOLUMES_PER_POD, VSPHERE_SPBM_POLICY_NAME, VSPHERE_DATASTORE from System Environment.
+3. Launch VCP_SCALE_INSTANCES goroutine for creating VCP_SCALE_VOLUME_COUNT volumes. Each goroutine is responsible for create/attach of VCP_SCALE_VOLUME_COUNT/VCP_SCALE_INSTANCES volumes.
+4. Read VCP_SCALE_VOLUMES_PER_POD from System Environment. Each pod will be have VCP_SCALE_VOLUMES_PER_POD attached to it.
+5. Once all the go routines are completed, we delete all the pods and volumes.
 */
 const (
 	NodeLabelKey = "vsphere_e2e_label"
@@ -57,6 +58,7 @@ type NodeSelector struct {
 
 var _ = utils.SIGDescribe("vcp at scale [Feature:vsphere] ", func() {
 	f := framework.NewDefaultFramework("vcp-at-scale")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 
 	var (
 		client            clientset.Interface
@@ -149,7 +151,7 @@ var _ = utils.SIGDescribe("vcp at scale [Feature:vsphere] ", func() {
 				volumeCountPerInstance = volumeCount
 			}
 			volumeCount = volumeCount - volumeCountPerInstance
-			go VolumeCreateAndAttach(client, namespace, scArrays, volumeCountPerInstance, volumesPerPod, nodeSelectorList, nodeVolumeMapChan)
+			go VolumeCreateAndAttach(client, f.Timeouts, namespace, scArrays, volumeCountPerInstance, volumesPerPod, nodeSelectorList, nodeVolumeMapChan)
 		}
 
 		// Get the list of all volumes attached to each node from the go routines by reading the data from the channel
@@ -189,7 +191,7 @@ func getClaimsForPod(pod *v1.Pod, volumesPerPod int) []string {
 }
 
 // VolumeCreateAndAttach peforms create and attach operations of vSphere persistent volumes at scale
-func VolumeCreateAndAttach(client clientset.Interface, namespace string, sc []*storagev1.StorageClass, volumeCountPerInstance int, volumesPerPod int, nodeSelectorList []*NodeSelector, nodeVolumeMapChan chan map[string][]string) {
+func VolumeCreateAndAttach(client clientset.Interface, timeouts *framework.TimeoutContext, namespace string, sc []*storagev1.StorageClass, volumeCountPerInstance int, volumesPerPod int, nodeSelectorList []*NodeSelector, nodeVolumeMapChan chan map[string][]string) {
 	defer ginkgo.GinkgoRecover()
 	nodeVolumeMap := make(map[string][]string)
 	nodeSelectorIndex := 0
@@ -206,7 +208,7 @@ func VolumeCreateAndAttach(client clientset.Interface, namespace string, sc []*s
 		}
 
 		ginkgo.By("Waiting for claim to be in bound phase")
-		persistentvolumes, err := e2epv.WaitForPVClaimBoundPhase(client, pvclaims, framework.ClaimProvisionTimeout)
+		persistentvolumes, err := e2epv.WaitForPVClaimBoundPhase(client, pvclaims, timeouts.ClaimProvision)
 		framework.ExpectNoError(err)
 
 		ginkgo.By("Creating pod to attach PV to the node")

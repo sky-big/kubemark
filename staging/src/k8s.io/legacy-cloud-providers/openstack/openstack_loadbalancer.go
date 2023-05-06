@@ -1,3 +1,4 @@
+//go:build !providerless
 // +build !providerless
 
 /*
@@ -21,7 +22,6 @@ package openstack
 import (
 	"context"
 	"fmt"
-	"net"
 	"reflect"
 	"strings"
 	"time"
@@ -40,6 +40,7 @@ import (
 	neutronports "github.com/gophercloud/gophercloud/openstack/networking/v2/ports"
 	"github.com/gophercloud/gophercloud/pagination"
 	"k8s.io/klog/v2"
+	netutils "k8s.io/utils/net"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -521,7 +522,7 @@ func nodeAddressForLB(node *v1.Node) (string, error) {
 	return "", ErrNoAddressFound
 }
 
-//getStringFromServiceAnnotation searches a given v1.Service for a specific annotationKey and either returns the annotation's value or a specified defaultSetting
+// getStringFromServiceAnnotation searches a given v1.Service for a specific annotationKey and either returns the annotation's value or a specified defaultSetting
 func getStringFromServiceAnnotation(service *v1.Service, annotationKey string, defaultSetting string) string {
 	klog.V(4).Infof("getStringFromServiceAnnotation(%v, %v, %v)", service, annotationKey, defaultSetting)
 	if annotationValue, ok := service.Annotations[annotationKey]; ok {
@@ -1059,7 +1060,7 @@ func (lbaas *LbaasV2) ensureSecurityGroup(clusterName string, apiService *v1.Ser
 		for _, port := range ports {
 			for _, sourceRange := range sourceRanges.StringSlice() {
 				ethertype := rules.EtherType4
-				network, _, err := net.ParseCIDR(sourceRange)
+				network, _, err := netutils.ParseCIDRSloppy(sourceRange)
 
 				if err != nil {
 					return fmt.Errorf("error parsing source range %s as a CIDR: %v", sourceRange, err)

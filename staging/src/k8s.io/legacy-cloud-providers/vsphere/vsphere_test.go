@@ -1,3 +1,4 @@
+//go:build !providerless
 // +build !providerless
 
 /*
@@ -32,6 +33,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/vmware/govmomi/find"
@@ -53,11 +55,11 @@ import (
 
 	cloudprovider "k8s.io/cloud-provider"
 	"k8s.io/legacy-cloud-providers/vsphere/vclib"
-	"k8s.io/legacy-cloud-providers/vsphere/vclib/fixtures"
 )
 
 // localhostCert was generated from crypto/tls/generate_cert.go with the following command:
-//     go run generate_cert.go  --rsa-bits 2048 --host 127.0.0.1,::1,example.com --ca --start-date "Jan 1 00:00:00 1970" --duration=1000000h
+//
+//	go run generate_cert.go  --rsa-bits 2048 --host 127.0.0.1,::1,example.com --ca --start-date "Jan 1 00:00:00 1970" --duration=1000000h
 var localhostCert = `-----BEGIN CERTIFICATE-----
 MIIDGDCCAgCgAwIBAgIQTKCKn99d5HhQVCLln2Q+eTANBgkqhkiG9w0BAQsFADAS
 MRAwDgYDVQQKEwdBY21lIENvMCAXDTcwMDEwMTAwMDAwMFoYDzIwODQwMTI5MTYw
@@ -205,6 +207,97 @@ func configFromEnvOrSim() (VSphereConfig, func()) {
 	return configFromSim()
 }
 
+func init() {
+	klog.InitFlags(nil)
+}
+
+func TestSecretUpdated(t *testing.T) {
+	datacenter := "0.0.0.0"
+	secretName := "vccreds"
+	secretNamespace := "kube-system"
+	username := "test-username"
+	password := "test-password"
+	basicSecret := fakeSecret(secretName, secretNamespace, datacenter, username, password)
+
+	cfg, cleanup := configFromSim()
+	defer cleanup()
+
+	cfg.Global.User = username
+	cfg.Global.Password = password
+	cfg.Global.Datacenter = datacenter
+	cfg.Global.SecretName = secretName
+	cfg.Global.SecretNamespace = secretNamespace
+
+	vsphere, err := buildVSphereFromConfig(cfg)
+	if err != nil {
+		t.Fatalf("Should succeed when a valid config is provided: %s", err)
+	}
+
+	flag.Set("logtostderr", "false")
+	flag.Set("alsologtostderr", "false")
+	flag.Set("v", "9")
+	flag.Parse()
+
+	testcases := []struct {
+		name            string
+		oldSecret       *v1.Secret
+		secret          *v1.Secret
+		expectOutput    bool
+		expectErrOutput bool
+	}{
+		{
+			name:         "Secrets are equal",
+			oldSecret:    basicSecret.DeepCopy(),
+			secret:       basicSecret.DeepCopy(),
+			expectOutput: false,
+		},
+		{
+			name:         "Secret with a different name",
+			oldSecret:    basicSecret.DeepCopy(),
+			secret:       fakeSecret("different", secretNamespace, datacenter, username, password),
+			expectOutput: false,
+		},
+		{
+			name:         "Secret with a different data",
+			oldSecret:    basicSecret.DeepCopy(),
+			secret:       fakeSecret(secretName, secretNamespace, datacenter, "...", "..."),
+			expectOutput: true,
+		},
+		{
+			name:            "Secret being nil",
+			oldSecret:       basicSecret.DeepCopy(),
+			secret:          nil,
+			expectOutput:    true,
+			expectErrOutput: true,
+		},
+	}
+
+	for _, testcase := range testcases {
+		t.Run(testcase.name, func(t *testing.T) {
+			buf := new(buffer)
+			errBuf := new(buffer)
+
+			klog.SetOutputBySeverity("INFO", buf)
+			klog.SetOutputBySeverity("WARNING", errBuf)
+
+			vsphere.SecretUpdated(testcase.oldSecret, testcase.secret)
+
+			klog.Flush()
+			if testcase.expectOutput && len(buf.String()) == 0 {
+				t.Fatalf("Expected log secret update for secrets:\nOld:\n\t%+v\nNew\n\t%+v", testcase.oldSecret, testcase.secret)
+			} else if !testcase.expectOutput && len(buf.String()) > 0 {
+				t.Fatalf("Unexpected log messages for secrets:\nOld:\n\t%+v\n\nNew:\n\t%+v\nMessage:%s", testcase.oldSecret, testcase.secret, buf.String())
+			}
+
+			if testcase.expectErrOutput && len(errBuf.String()) == 0 {
+				t.Fatalf("Expected log error output on secret update for secrets:\nOld:\n\t%+v\nNew\n\t%+v", testcase.oldSecret, testcase.secret)
+			} else if !testcase.expectErrOutput && len(errBuf.String()) > 0 {
+				t.Fatalf("Unexpected log error messages for secrets:\nOld:\n\t%+v\n\nNew:\n\t%+v\nMessage:%s", testcase.oldSecret, testcase.secret, errBuf.String())
+			}
+		})
+	}
+}
+
 func TestReadConfig(t *testing.T) {
 	_, err := readConfig(nil)
 	if err == nil {
@@ -318,12 +411,12 @@ func TestVSphereLoginByToken(t *testing.T) {
 }
 
 func TestVSphereLoginWithCaCert(t *testing.T) {
-	caCertPEM, err := ioutil.ReadFile(fixtures.CaCertPath)
+	caCertPEM, err := ioutil.ReadFile("./vclib/testdata/ca.pem")
 	if err != nil {
 		t.Fatalf("Could not read ca cert from file")
 	}
 
-	serverCert, err := tls.LoadX509KeyPair(fixtures.ServerCertPath, fixtures.ServerKeyPath)
+	serverCert, err := tls.LoadX509KeyPair("./vclib/testdata/server.pem", "./vclib/testdata/server.key")
 	if err != nil {
 		t.Fatalf("Could not load server cert and server key from files: %#v", err)
 	}
@@ -341,7 +434,7 @@ func TestVSphereLoginWithCaCert(t *testing.T) {
 	cfg, cleanup := configFromSimWithTLS(&tlsConfig, false)
 	defer cleanup()
 
-	cfg.Global.CAFile = fixtures.CaCertPath
+	cfg.Global.CAFile = "./vclib/testdata/ca.pem"
 
 	// Create vSphere configuration object
 	vs, err := newControllerNode(cfg)
@@ -368,6 +461,68 @@ func TestZonesNoConfig(t *testing.T) {
 	_, ok := new(VSphere).Zones()
 	if ok {
 		t.Fatalf("Zones() should return false without VCP configured")
+	}
+}
+
+func TestZonesWithCredsInSecret(t *testing.T) {
+	noSecretCfg, err := readConfig(strings.NewReader(`
+[Global]
+user = "vsphere-creds"
+password = "kube-system"
+insecure-flag = "1"
+[Workspace]
+server = "vcenter.example.com"
+datacenter = "LAB"
+default-datastore = "datastore"
+folder = "/LAB/vm/lab-gxjfk"
+[VirtualCenter "vcenter.example.com"]
+datacenters = "LAB"
+[Labels]
+region = "kube-region"
+zone = "kube-zone"
+`))
+	if err != nil {
+		t.Fatalf("Should succeed when a valid config is provided: %s", err)
+	}
+	vsphere, err := buildVSphereFromConfig(noSecretCfg)
+	if err != nil {
+		t.Fatalf("Should succeed when a valid config is provided: %s", err)
+	}
+	_, ok := vsphere.Zones()
+	if !ok {
+		t.Fatalf("Zones should return true with plain text credentials")
+	}
+
+	// Return false in case if secret provided but no informers (no NodeManager.credentialManager basically) set up.
+	// Such situation happens during kubelet startup process, when InitialNode creates.
+	// See https://github.com/kubernetes/kubernetes/issues/75175
+	// and https://github.com/kubernetes/kubernetes/blob/master/pkg/kubelet/kubelet_node_status.go#L418
+	withSecretCfg, err := readConfig(strings.NewReader(`
+[Global]
+secret-name = "vsphere-creds"
+secret-namespace = "kube-system"
+insecure-flag = "1"
+[Workspace]
+server = "vcenter.example.com"
+datacenter = "LAB"
+default-datastore = "datastore_big"
+folder = "/LAB/vm/lab-gxjfk"
+[VirtualCenter "vcenter.example.com"]
+datacenters = "LAB"
+[Labels]
+region = "kube-region"
+zone = "kube-zone"
+`))
+	if err != nil {
+		t.Fatalf("Should succeed when a valid config is provided: %s", err)
+	}
+	vsphere, err = buildVSphereFromConfig(withSecretCfg)
+	if err != nil {
+		t.Fatalf("Should succeed when a valid config is provided: %s", err)
+	}
+	_, ok = vsphere.Zones()
+	if ok {
+		t.Fatalf("Zones should return false with plain credentials in secret")
 	}
 }
 
@@ -1166,91 +1321,19 @@ func fakeSecret(name, namespace, datacenter, user, password string) *v1.Secret {
 	}
 }
 
-func TestSecretUpdated(t *testing.T) {
-	datacenter := "0.0.0.0"
-	secretName := "vccreds"
-	secretNamespace := "kube-system"
-	username := "test-username"
-	password := "test-password"
-	basicSecret := fakeSecret(secretName, secretNamespace, datacenter, username, password)
+type buffer struct {
+	b  bytes.Buffer
+	rw sync.RWMutex
+}
 
-	cfg, cleanup := configFromSim()
-	defer cleanup()
+func (b *buffer) String() string {
+	b.rw.RLock()
+	defer b.rw.RUnlock()
+	return b.b.String()
+}
 
-	cfg.Global.User = username
-	cfg.Global.Password = password
-	cfg.Global.Datacenter = datacenter
-	cfg.Global.SecretName = secretName
-	cfg.Global.SecretNamespace = secretNamespace
-
-	vsphere, err := buildVSphereFromConfig(cfg)
-	if err != nil {
-		t.Fatalf("Should succeed when a valid config is provided: %s", err)
-	}
-	klog.Flush()
-
-	klog.InitFlags(nil)
-	flag.Set("logtostderr", "false")
-	flag.Set("alsologtostderr", "false")
-	flag.Set("v", "9")
-	flag.Parse()
-
-	testcases := []struct {
-		name            string
-		oldSecret       *v1.Secret
-		secret          *v1.Secret
-		expectOutput    bool
-		expectErrOutput bool
-	}{
-		{
-			name:         "Secrets are equal",
-			oldSecret:    basicSecret.DeepCopy(),
-			secret:       basicSecret.DeepCopy(),
-			expectOutput: false,
-		},
-		{
-			name:         "Secret with a different name",
-			oldSecret:    basicSecret.DeepCopy(),
-			secret:       fakeSecret("different", secretNamespace, datacenter, username, password),
-			expectOutput: false,
-		},
-		{
-			name:         "Secret with a different data",
-			oldSecret:    basicSecret.DeepCopy(),
-			secret:       fakeSecret(secretName, secretNamespace, datacenter, "...", "..."),
-			expectOutput: true,
-		},
-		{
-			name:            "Secret being nil",
-			oldSecret:       basicSecret.DeepCopy(),
-			secret:          nil,
-			expectOutput:    true,
-			expectErrOutput: true,
-		},
-	}
-
-	for _, testcase := range testcases {
-		t.Run(testcase.name, func(t *testing.T) {
-			buf := new(bytes.Buffer)
-			errBuf := new(bytes.Buffer)
-
-			klog.SetOutputBySeverity("INFO", buf)
-			klog.SetOutputBySeverity("WARNING", errBuf)
-
-			vsphere.SecretUpdated(testcase.oldSecret, testcase.secret)
-
-			klog.Flush()
-			if testcase.expectOutput && len(buf.String()) == 0 {
-				t.Fatalf("Expected log secret update for secrets:\nOld:\n\t%+v\nNew\n\t%+v", testcase.oldSecret, testcase.secret)
-			} else if !testcase.expectOutput && len(buf.String()) > 0 {
-				t.Fatalf("Unexpected log messages for secrets:\nOld:\n\t%+v\n\nNew:\n\t%+v\nMessage:%s", testcase.oldSecret, testcase.secret, buf.String())
-			}
-
-			if testcase.expectErrOutput && len(errBuf.String()) == 0 {
-				t.Fatalf("Expected log error output on secret update for secrets:\nOld:\n\t%+v\nNew\n\t%+v", testcase.oldSecret, testcase.secret)
-			} else if !testcase.expectErrOutput && len(errBuf.String()) > 0 {
-				t.Fatalf("Unexpected log error messages for secrets:\nOld:\n\t%+v\n\nNew:\n\t%+v\nMessage:%s", testcase.oldSecret, testcase.secret, errBuf.String())
-			}
-		})
-	}
+func (b *buffer) Write(p []byte) (n int, err error) {
+	b.rw.Lock()
+	defer b.rw.Unlock()
+	return b.b.Write(p)
 }

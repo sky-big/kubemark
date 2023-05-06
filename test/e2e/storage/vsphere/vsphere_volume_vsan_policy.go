@@ -36,6 +36,7 @@ import (
 	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	"k8s.io/kubernetes/test/e2e/storage/utils"
+	admissionapi "k8s.io/pod-security-admission/api"
 )
 
 const (
@@ -76,6 +77,7 @@ const (
 
 var _ = utils.SIGDescribe("Storage Policy Based Volume Provisioning [Feature:vsphere]", func() {
 	f := framework.NewDefaultFramework("volume-vsan-policy")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	var (
 		client       clientset.Interface
 		namespace    string
@@ -269,7 +271,7 @@ func invokeValidPolicyTest(f *framework.Framework, client clientset.Interface, n
 	var pvclaims []*v1.PersistentVolumeClaim
 	pvclaims = append(pvclaims, pvclaim)
 	ginkgo.By("Waiting for claim to be in bound phase")
-	persistentvolumes, err := e2epv.WaitForPVClaimBoundPhase(client, pvclaims, framework.ClaimProvisionTimeout)
+	persistentvolumes, err := e2epv.WaitForPVClaimBoundPhase(client, pvclaims, f.Timeouts.ClaimProvision)
 	framework.ExpectNoError(err)
 
 	ginkgo.By("Creating pod to attach PV to the node")

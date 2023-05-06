@@ -30,10 +30,12 @@ import (
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	"k8s.io/kubernetes/test/e2e/storage/testsuites"
 	"k8s.io/kubernetes/test/e2e/storage/utils"
+	admissionapi "k8s.io/pod-security-admission/api"
 )
 
 var _ = utils.SIGDescribe("GenericPersistentVolume[Disruptive]", func() {
 	f := framework.NewDefaultFramework("generic-disruptive-pv")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	var (
 		c  clientset.Interface
 		ns string
@@ -70,6 +72,7 @@ var _ = utils.SIGDescribe("GenericPersistentVolume[Disruptive]", func() {
 			pv        *v1.PersistentVolume
 		)
 		ginkgo.BeforeEach(func() {
+			e2epv.SkipIfNoDefaultStorageClass(c)
 			framework.Logf("Initializing pod and pvcs for test")
 			clientPod, pvc, pv = createPodPVCFromSC(f, c, ns)
 		})
@@ -93,6 +96,7 @@ func createPodPVCFromSC(f *framework.Framework, c clientset.Interface, ns string
 	var err error
 	test := testsuites.StorageClassTest{
 		Name:      "default",
+		Timeouts:  f.Timeouts,
 		ClaimSize: "2Gi",
 	}
 	pvc := e2epv.MakePersistentVolumeClaim(e2epv.PersistentVolumeClaimConfig{
@@ -112,7 +116,7 @@ func createPodPVCFromSC(f *framework.Framework, c clientset.Interface, ns string
 		PVCs:         pvcClaims,
 		SeLinuxLabel: e2epv.SELinuxLabel,
 	}
-	pod, err := e2epod.CreateSecPod(c, &podConfig, framework.PodStartTimeout)
+	pod, err := e2epod.CreateSecPod(c, &podConfig, f.Timeouts.PodStart)
 	framework.ExpectNoError(err, "While creating pods for kubelet restart test")
 	return pod, pvc, pvs[0]
 }

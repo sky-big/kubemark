@@ -26,7 +26,6 @@ import (
 	certificatesv1 "k8s.io/api/certificates/v1"
 	certificatesv1beta1 "k8s.io/api/certificates/v1beta1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -41,6 +40,7 @@ import (
 	"k8s.io/kubectl/pkg/util/templates"
 )
 
+// NewCmdCertificate returns `certificate` Cobra command
 func NewCmdCertificate(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:                   "certificate SUBCOMMAND",
@@ -58,6 +58,7 @@ func NewCmdCertificate(f cmdutil.Factory, ioStreams genericclioptions.IOStreams)
 	return cmd
 }
 
+// CertificateOptions declares the arguments accepted by the certificate command
 type CertificateOptions struct {
 	resource.FilenameOptions
 
@@ -73,7 +74,7 @@ type CertificateOptions struct {
 	genericclioptions.IOStreams
 }
 
-// NewCertificateOptions creates the options for certificate
+// NewCertificateOptions creates CertificateOptions struct for `certificate` command
 func NewCertificateOptions(ioStreams genericclioptions.IOStreams, operation string) *CertificateOptions {
 	return &CertificateOptions{
 		PrintFlags: genericclioptions.NewPrintFlags(operation).WithTypeSetter(scheme.Scheme),
@@ -81,6 +82,7 @@ func NewCertificateOptions(ioStreams genericclioptions.IOStreams, operation stri
 	}
 }
 
+// Complete loads data from the command environment
 func (o *CertificateOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []string) error {
 	o.csrNames = args
 	o.outputStyle = cmdutil.GetFlagString(cmd, "output")
@@ -104,6 +106,7 @@ func (o *CertificateOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, arg
 	return nil
 }
 
+// Validate checks if the provided `certificate` arguments are valid
 func (o *CertificateOptions) Validate() error {
 	if len(o.csrNames) < 1 && cmdutil.IsFilenameSliceEmpty(o.Filenames, o.Kustomize) {
 		return fmt.Errorf("one or more CSRs must be specified as <name> or -f <filename>")
@@ -111,6 +114,7 @@ func (o *CertificateOptions) Validate() error {
 	return nil
 }
 
+// NewCmdCertificateApprove returns the `certificate approve` Cobra command
 func NewCmdCertificateApprove(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cobra.Command {
 	o := NewCertificateOptions(ioStreams, "approved")
 
@@ -130,6 +134,10 @@ func NewCmdCertificateApprove(f cmdutil.Factory, ioStreams genericclioptions.IOS
 		as a requested identity. Before approving a CSR, ensure you understand what the
 		signed certificate can do.
 		`)),
+		Example: templates.Examples(i18n.T(`
+			# Approve CSR 'csr-sqgzp'
+			kubectl certificate approve csr-sqgzp
+		`)),
 		Run: func(cmd *cobra.Command, args []string) {
 			cmdutil.CheckErr(o.Complete(f, cmd, args))
 			cmdutil.CheckErr(o.Validate())
@@ -145,6 +153,7 @@ func NewCmdCertificateApprove(f cmdutil.Factory, ioStreams genericclioptions.IOS
 	return cmd
 }
 
+// RunCertificateApprove approves a certificate signing request
 func (o *CertificateOptions) RunCertificateApprove(force bool) error {
 	return o.modifyCertificateCondition(
 		o.builder,
@@ -154,6 +163,7 @@ func (o *CertificateOptions) RunCertificateApprove(force bool) error {
 	)
 }
 
+// NewCmdCertificateDeny returns the `certificate deny` Cobra command
 func NewCmdCertificateDeny(f cmdutil.Factory, ioStreams genericclioptions.IOStreams) *cobra.Command {
 	o := NewCertificateOptions(ioStreams, "denied")
 
@@ -167,6 +177,10 @@ func NewCmdCertificateDeny(f cmdutil.Factory, ioStreams genericclioptions.IOStre
 		kubectl certificate deny allows a cluster admin to deny a certificate
 		signing request (CSR). This action tells a certificate signing controller to
 		not to issue a certificate to the requestor.
+		`)),
+		Example: templates.Examples(i18n.T(`
+			# Deny CSR 'csr-sqgzp'
+			kubectl certificate deny csr-sqgzp
 		`)),
 		Run: func(cmd *cobra.Command, args []string) {
 			cmdutil.CheckErr(o.Complete(f, cmd, args))
@@ -183,6 +197,7 @@ func NewCmdCertificateDeny(f cmdutil.Factory, ioStreams genericclioptions.IOStre
 	return cmd
 }
 
+// RunCertificateDeny denies a certificate signing request
 func (o *CertificateOptions) RunCertificateDeny(force bool) error {
 	return o.modifyCertificateCondition(
 		o.builder,
@@ -243,7 +258,7 @@ func (o *CertificateOptions) modifyCertificateCondition(builder *resource.Builde
 				default:
 					return fmt.Errorf("can only handle certificates.k8s.io CertificateSigningRequest objects, got %T", modifiedCSR)
 				}
-				if errors.IsConflict(err) && i < 10 {
+				if apierrors.IsConflict(err) && i < 10 {
 					if err := info.Get(); err != nil {
 						return err
 					}

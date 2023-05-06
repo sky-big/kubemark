@@ -25,12 +25,14 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	clientset "k8s.io/client-go/kubernetes"
+
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	"k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/validation"
 	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/options"
 	phases "k8s.io/kubernetes/cmd/kubeadm/app/cmd/phases/upgrade/node"
 	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/phases/workflow"
 	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
+	"k8s.io/kubernetes/cmd/kubeadm/app/phases/uploadconfig"
 	configutil "k8s.io/kubernetes/cmd/kubeadm/app/util/config"
 )
 
@@ -49,7 +51,7 @@ type nodeOptions struct {
 // compile-time assert that the local data object satisfies the phases data interface.
 var _ phases.Data = &nodeData{}
 
-// nodeData defines all the runtime information used when running the kubeadm upgrade node worklow;
+// nodeData defines all the runtime information used when running the kubeadm upgrade node workflow;
 // this data is shared across all the phases that are included in the workflow.
 type nodeData struct {
 	etcdUpgrade           bool
@@ -60,6 +62,7 @@ type nodeData struct {
 	client                clientset.Interface
 	patchesDir            string
 	ignorePreflightErrors sets.String
+	kubeConfigPath        string
 }
 
 // newCmdNode returns the cobra command for `kubeadm upgrade node`
@@ -141,6 +144,11 @@ func newNodeData(cmd *cobra.Command, args []string, options *nodeOptions) (*node
 	if err != nil {
 		return nil, errors.Wrap(err, "unable to fetch the kubeadm-config ConfigMap")
 	}
+	// In case we fetch a configuration from the cluster, mutate the ImageRepository field
+	// to be 'registry.k8s.io', if it was 'k8s.gcr.io'. Don't mutate the in-cluster value by passing
+	// nil as the client field; this is done only on "apply".
+	// https://github.com/kubernetes/kubeadm/issues/2671
+	_ = uploadconfig.MutateImageRepository(cfg, nil)
 
 	ignorePreflightErrorsSet, err := validation.ValidateIgnorePreflightErrors(options.ignorePreflightErrors, cfg.NodeRegistration.IgnorePreflightErrors)
 	if err != nil {
@@ -158,6 +166,7 @@ func newNodeData(cmd *cobra.Command, args []string, options *nodeOptions) (*node
 		isControlPlaneNode:    isControlPlaneNode,
 		patchesDir:            options.patchesDir,
 		ignorePreflightErrors: ignorePreflightErrorsSet,
+		kubeConfigPath:        options.kubeConfigPath,
 	}, nil
 }
 
@@ -199,4 +208,9 @@ func (d *nodeData) PatchesDir() string {
 // IgnorePreflightErrors returns the list of preflight errors to ignore.
 func (d *nodeData) IgnorePreflightErrors() sets.String {
 	return d.ignorePreflightErrors
+}
+
+// KubeconfigPath returns the path to the user kubeconfig file.
+func (d *nodeData) KubeConfigPath() string {
+	return d.kubeConfigPath
 }

@@ -126,6 +126,17 @@ var (
 		},
 	)
 
+	// IptablesRulesTotal is the number of iptables rules that the iptables proxy installs.
+	IptablesRulesTotal = metrics.NewGaugeVec(
+		&metrics.GaugeOpts{
+			Subsystem:      kubeProxySubsystem,
+			Name:           "sync_proxy_rules_iptables_total",
+			Help:           "Number of proxy iptables rules programmed",
+			StabilityLevel: metrics.ALPHA,
+		},
+		[]string{"table"},
+	)
+
 	// SyncProxyRulesLastQueuedTimestamp is the last time a proxy sync was
 	// requested. If this is much larger than
 	// kubeproxy_sync_proxy_rules_last_timestamp_seconds, then something is hung.
@@ -136,6 +147,19 @@ var (
 			Help:           "The last time a sync of proxy rules was queued",
 			StabilityLevel: metrics.ALPHA,
 		},
+	)
+
+	// SyncProxyRulesNoLocalEndpointsTotal is the total number of rules that do
+	// not have an available endpoint. This can be caused by an internal
+	// traffic policy with no available local workload.
+	SyncProxyRulesNoLocalEndpointsTotal = metrics.NewGaugeVec(
+		&metrics.GaugeOpts{
+			Subsystem:      kubeProxySubsystem,
+			Name:           "sync_proxy_rules_no_local_endpoints_total",
+			Help:           "Number of services with a Local traffic policy and no endpoints",
+			StabilityLevel: metrics.ALPHA,
+		},
+		[]string{"traffic_policy"},
 	)
 )
 
@@ -151,8 +175,10 @@ func RegisterMetrics() {
 		legacyregistry.MustRegister(EndpointChangesTotal)
 		legacyregistry.MustRegister(ServiceChangesPending)
 		legacyregistry.MustRegister(ServiceChangesTotal)
+		legacyregistry.MustRegister(IptablesRulesTotal)
 		legacyregistry.MustRegister(IptablesRestoreFailuresTotal)
 		legacyregistry.MustRegister(SyncProxyRulesLastQueuedTimestamp)
+		legacyregistry.MustRegister(SyncProxyRulesNoLocalEndpointsTotal)
 	})
 }
 

@@ -20,16 +20,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-
-	"github.com/pkg/errors"
 
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -47,28 +48,28 @@ import (
 // or be built into the binary.
 //
 // LoadFromManifests has some limitations:
-// - aliases are not supported (i.e. use serviceAccountName instead of the deprecated serviceAccount,
-//   https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.11/#podspec-v1-core)
-//   and silently ignored
-// - the latest stable API version for each item is used, regardless of what
-//   is specified in the manifest files
+//   - aliases are not supported (i.e. use serviceAccountName instead of the deprecated serviceAccount,
+//     https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.11/#podspec-v1-core)
+//     and silently ignored
+//   - the latest stable API version for each item is used, regardless of what
+//     is specified in the manifest files
 func LoadFromManifests(files ...string) ([]interface{}, error) {
 	var items []interface{}
 	err := visitManifests(func(data []byte) error {
 		// Ignore any additional fields for now, just determine what we have.
 		var what What
 		if err := runtime.DecodeInto(scheme.Codecs.UniversalDecoder(), data, &what); err != nil {
-			return errors.Wrap(err, "decode TypeMeta")
+			return fmt.Errorf("decode TypeMeta: %w", err)
 		}
 
 		factory := factories[what]
 		if factory == nil {
-			return errors.Errorf("item of type %+v not supported", what)
+			return fmt.Errorf("item of type %+v not supported", what)
 		}
 
 		object := factory.New()
 		if err := runtime.DecodeInto(scheme.Codecs.UniversalDecoder(), data, object); err != nil {
-			return errors.Wrapf(err, "decode %+v", what)
+			return fmt.Errorf("decode %+v: %w", what, err)
 		}
 		items = append(items, object)
 		return nil
@@ -96,7 +97,7 @@ func visitManifests(cb func([]byte) error, files ...string) error {
 
 		for _, item := range items {
 			if err := cb(item); err != nil {
-				return errors.Wrap(err, fileName)
+				return fmt.Errorf("%s: %w", fileName, err)
 			}
 		}
 	}
@@ -131,10 +132,10 @@ func PatchItems(f *framework.Framework, driverNamspace *v1.Namespace, items ...i
 // It returns either a cleanup function or an error, but never both.
 //
 // Cleaning up after a test can be triggered in two ways:
-// - the test invokes the returned cleanup function,
-//   usually in an AfterEach
-// - the test suite terminates, potentially after
-//   skipping the test's AfterEach (https://github.com/onsi/ginkgo/issues/222)
+//   - the test invokes the returned cleanup function,
+//     usually in an AfterEach
+//   - the test suite terminates, potentially after
+//     skipping the test's AfterEach (https://github.com/onsi/ginkgo/issues/222)
 //
 // PatchItems has the some limitations as LoadFromManifests:
 // - only some common items are supported, unknown ones trigger an error
@@ -173,13 +174,13 @@ func CreateItems(f *framework.Framework, ns *v1.Namespace, items ...interface{})
 			if err == nil {
 				done = true
 				break
-			} else if errors.Cause(err) != errorItemNotSupported {
+			} else if !errors.Is(err, errorItemNotSupported) {
 				result = err
 				break
 			}
 		}
 		if result == nil && !done {
-			result = errors.Errorf("item of type %T not supported", item)
+			result = fmt.Errorf("item of type %T not supported", item)
 			break
 		}
 	}
@@ -198,7 +199,7 @@ func CreateItems(f *framework.Framework, ns *v1.Namespace, items ...interface{})
 func CreateFromManifests(f *framework.Framework, driverNamespace *v1.Namespace, patch func(item interface{}) error, files ...string) (func(), error) {
 	items, err := LoadFromManifests(files...)
 	if err != nil {
-		return nil, errors.Wrap(err, "CreateFromManifests")
+		return nil, fmt.Errorf("CreateFromManifests: %w", err)
 	}
 	if err := PatchItems(f, driverNamespace, items...); err != nil {
 		return nil, err
@@ -270,17 +271,19 @@ func describeItem(item interface{}) string {
 var errorItemNotSupported = errors.New("not supported")
 
 var factories = map[What]ItemFactory{
-	{"ClusterRole"}:        &clusterRoleFactory{},
-	{"ClusterRoleBinding"}: &clusterRoleBindingFactory{},
-	{"CSIDriver"}:          &csiDriverFactory{},
-	{"DaemonSet"}:          &daemonSetFactory{},
-	{"Role"}:               &roleFactory{},
-	{"RoleBinding"}:        &roleBindingFactory{},
-	{"Secret"}:             &secretFactory{},
-	{"Service"}:            &serviceFactory{},
-	{"ServiceAccount"}:     &serviceAccountFactory{},
-	{"StatefulSet"}:        &statefulSetFactory{},
-	{"StorageClass"}:       &storageClassFactory{},
+	{"ClusterRole"}:              &clusterRoleFactory{},
+	{"ClusterRoleBinding"}:       &clusterRoleBindingFactory{},
+	{"CSIDriver"}:                &csiDriverFactory{},
+	{"DaemonSet"}:                &daemonSetFactory{},
+	{"Role"}:                     &roleFactory{},
+	{"RoleBinding"}:              &roleBindingFactory{},
+	{"Secret"}:                   &secretFactory{},
+	{"Service"}:                  &serviceFactory{},
+	{"ServiceAccount"}:           &serviceAccountFactory{},
+	{"StatefulSet"}:              &statefulSetFactory{},
+	{"Deployment"}:               &deploymentFactory{},
+	{"StorageClass"}:             &storageClassFactory{},
+	{"CustomResourceDefinition"}: &customResourceDefinitionFactory{},
 }
 
 // PatchName makes the name of some item unique by appending the
@@ -337,25 +340,33 @@ func patchItemRecursively(f *framework.Framework, driverNamespace *v1.Namespace,
 		PatchName(f, &item.Name)
 		for i := range item.Subjects {
 			if err := patchItemRecursively(f, driverNamespace, &item.Subjects[i]); err != nil {
-				return errors.Wrapf(err, "%T", f)
+				return fmt.Errorf("%T: %w", f, err)
 			}
 		}
 		if err := patchItemRecursively(f, driverNamespace, &item.RoleRef); err != nil {
-			return errors.Wrapf(err, "%T", f)
+			return fmt.Errorf("%T: %w", f, err)
 		}
 	case *rbacv1.RoleBinding:
 		PatchNamespace(f, driverNamespace, &item.Namespace)
 		for i := range item.Subjects {
 			if err := patchItemRecursively(f, driverNamespace, &item.Subjects[i]); err != nil {
-				return errors.Wrapf(err, "%T", f)
+				return fmt.Errorf("%T: %w", f, err)
 			}
 		}
 		if err := patchItemRecursively(f, driverNamespace, &item.RoleRef); err != nil {
-			return errors.Wrapf(err, "%T", f)
+			return fmt.Errorf("%T: %w", f, err)
 		}
 	case *v1.Service:
 		PatchNamespace(f, driverNamespace, &item.ObjectMeta.Namespace)
 	case *appsv1.StatefulSet:
+		PatchNamespace(f, driverNamespace, &item.ObjectMeta.Namespace)
+		if err := patchContainerImages(item.Spec.Template.Spec.Containers); err != nil {
+			return err
+		}
+		if err := patchContainerImages(item.Spec.Template.Spec.InitContainers); err != nil {
+			return err
+		}
+	case *appsv1.Deployment:
 		PatchNamespace(f, driverNamespace, &item.ObjectMeta.Namespace)
 		if err := patchContainerImages(item.Spec.Template.Spec.Containers); err != nil {
 			return err
@@ -371,8 +382,10 @@ func patchItemRecursively(f *framework.Framework, driverNamespace *v1.Namespace,
 		if err := patchContainerImages(item.Spec.Template.Spec.InitContainers); err != nil {
 			return err
 		}
+	case *apiextensionsv1.CustomResourceDefinition:
+		// Do nothing. Patching name to all CRDs won't always be the expected behavior.
 	default:
-		return errors.Errorf("missing support for patching item of type %T", item)
+		return fmt.Errorf("missing support for patching item of type %T", item)
 	}
 	return nil
 }
@@ -395,7 +408,7 @@ func (*serviceAccountFactory) Create(f *framework.Framework, ns *v1.Namespace, i
 	}
 	client := f.ClientSet.CoreV1().ServiceAccounts(ns.Name)
 	if _, err := client.Create(context.TODO(), item, metav1.CreateOptions{}); err != nil {
-		return nil, errors.Wrap(err, "create ServiceAccount")
+		return nil, fmt.Errorf("create ServiceAccount: %w", err)
 	}
 	return func() error {
 		return client.Delete(context.TODO(), item.GetName(), metav1.DeleteOptions{})
@@ -417,7 +430,7 @@ func (*clusterRoleFactory) Create(f *framework.Framework, ns *v1.Namespace, i in
 	framework.Logf("Define cluster role %v", item.GetName())
 	client := f.ClientSet.RbacV1().ClusterRoles()
 	if _, err := client.Create(context.TODO(), item, metav1.CreateOptions{}); err != nil {
-		return nil, errors.Wrap(err, "create ClusterRole")
+		return nil, fmt.Errorf("create ClusterRole: %w", err)
 	}
 	return func() error {
 		return client.Delete(context.TODO(), item.GetName(), metav1.DeleteOptions{})
@@ -438,7 +451,7 @@ func (*clusterRoleBindingFactory) Create(f *framework.Framework, ns *v1.Namespac
 
 	client := f.ClientSet.RbacV1().ClusterRoleBindings()
 	if _, err := client.Create(context.TODO(), item, metav1.CreateOptions{}); err != nil {
-		return nil, errors.Wrap(err, "create ClusterRoleBinding")
+		return nil, fmt.Errorf("create ClusterRoleBinding: %w", err)
 	}
 	return func() error {
 		return client.Delete(context.TODO(), item.GetName(), metav1.DeleteOptions{})
@@ -459,7 +472,7 @@ func (*roleFactory) Create(f *framework.Framework, ns *v1.Namespace, i interface
 
 	client := f.ClientSet.RbacV1().Roles(ns.Name)
 	if _, err := client.Create(context.TODO(), item, metav1.CreateOptions{}); err != nil {
-		return nil, errors.Wrap(err, "create Role")
+		return nil, fmt.Errorf("create Role: %w", err)
 	}
 	return func() error {
 		return client.Delete(context.TODO(), item.GetName(), metav1.DeleteOptions{})
@@ -480,7 +493,7 @@ func (*roleBindingFactory) Create(f *framework.Framework, ns *v1.Namespace, i in
 
 	client := f.ClientSet.RbacV1().RoleBindings(ns.Name)
 	if _, err := client.Create(context.TODO(), item, metav1.CreateOptions{}); err != nil {
-		return nil, errors.Wrap(err, "create RoleBinding")
+		return nil, fmt.Errorf("create RoleBinding: %w", err)
 	}
 	return func() error {
 		return client.Delete(context.TODO(), item.GetName(), metav1.DeleteOptions{})
@@ -501,7 +514,7 @@ func (*serviceFactory) Create(f *framework.Framework, ns *v1.Namespace, i interf
 
 	client := f.ClientSet.CoreV1().Services(ns.Name)
 	if _, err := client.Create(context.TODO(), item, metav1.CreateOptions{}); err != nil {
-		return nil, errors.Wrap(err, "create Service")
+		return nil, fmt.Errorf("create Service: %w", err)
 	}
 	return func() error {
 		return client.Delete(context.TODO(), item.GetName(), metav1.DeleteOptions{})
@@ -522,7 +535,28 @@ func (*statefulSetFactory) Create(f *framework.Framework, ns *v1.Namespace, i in
 
 	client := f.ClientSet.AppsV1().StatefulSets(ns.Name)
 	if _, err := client.Create(context.TODO(), item, metav1.CreateOptions{}); err != nil {
-		return nil, errors.Wrap(err, "create StatefulSet")
+		return nil, fmt.Errorf("create StatefulSet: %w", err)
+	}
+	return func() error {
+		return client.Delete(context.TODO(), item.GetName(), metav1.DeleteOptions{})
+	}, nil
+}
+
+type deploymentFactory struct{}
+
+func (f *deploymentFactory) New() runtime.Object {
+	return &appsv1.Deployment{}
+}
+
+func (*deploymentFactory) Create(f *framework.Framework, ns *v1.Namespace, i interface{}) (func() error, error) {
+	item, ok := i.(*appsv1.Deployment)
+	if !ok {
+		return nil, errorItemNotSupported
+	}
+
+	client := f.ClientSet.AppsV1().Deployments(ns.Name)
+	if _, err := client.Create(context.TODO(), item, metav1.CreateOptions{}); err != nil {
+		return nil, fmt.Errorf("create Deployment: %w", err)
 	}
 	return func() error {
 		return client.Delete(context.TODO(), item.GetName(), metav1.DeleteOptions{})
@@ -543,7 +577,7 @@ func (*daemonSetFactory) Create(f *framework.Framework, ns *v1.Namespace, i inte
 
 	client := f.ClientSet.AppsV1().DaemonSets(ns.Name)
 	if _, err := client.Create(context.TODO(), item, metav1.CreateOptions{}); err != nil {
-		return nil, errors.Wrap(err, "create DaemonSet")
+		return nil, fmt.Errorf("create DaemonSet: %w", err)
 	}
 	return func() error {
 		return client.Delete(context.TODO(), item.GetName(), metav1.DeleteOptions{})
@@ -564,7 +598,7 @@ func (*storageClassFactory) Create(f *framework.Framework, ns *v1.Namespace, i i
 
 	client := f.ClientSet.StorageV1().StorageClasses()
 	if _, err := client.Create(context.TODO(), item, metav1.CreateOptions{}); err != nil {
-		return nil, errors.Wrap(err, "create StorageClass")
+		return nil, fmt.Errorf("create StorageClass: %w", err)
 	}
 	return func() error {
 		return client.Delete(context.TODO(), item.GetName(), metav1.DeleteOptions{})
@@ -585,7 +619,7 @@ func (*csiDriverFactory) Create(f *framework.Framework, ns *v1.Namespace, i inte
 
 	client := f.ClientSet.StorageV1().CSIDrivers()
 	if _, err := client.Create(context.TODO(), item, metav1.CreateOptions{}); err != nil {
-		return nil, errors.Wrap(err, "create CSIDriver")
+		return nil, fmt.Errorf("create CSIDriver: %w", err)
 	}
 	return func() error {
 		return client.Delete(context.TODO(), item.GetName(), metav1.DeleteOptions{})
@@ -606,10 +640,39 @@ func (*secretFactory) Create(f *framework.Framework, ns *v1.Namespace, i interfa
 
 	client := f.ClientSet.CoreV1().Secrets(ns.Name)
 	if _, err := client.Create(context.TODO(), item, metav1.CreateOptions{}); err != nil {
-		return nil, errors.Wrap(err, "create Secret")
+		return nil, fmt.Errorf("create Secret: %w", err)
 	}
 	return func() error {
 		return client.Delete(context.TODO(), item.GetName(), metav1.DeleteOptions{})
+	}, nil
+}
+
+type customResourceDefinitionFactory struct{}
+
+func (f *customResourceDefinitionFactory) New() runtime.Object {
+	return &apiextensionsv1.CustomResourceDefinition{}
+}
+
+func (*customResourceDefinitionFactory) Create(f *framework.Framework, ns *v1.Namespace, i interface{}) (func() error, error) {
+	var err error
+	unstructCRD := &unstructured.Unstructured{}
+	gvr := schema.GroupVersionResource{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"}
+
+	item, ok := i.(*apiextensionsv1.CustomResourceDefinition)
+	if !ok {
+		return nil, errorItemNotSupported
+	}
+
+	unstructCRD.Object, err = runtime.DefaultUnstructuredConverter.ToUnstructured(i)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err = f.DynamicClient.Resource(gvr).Create(context.TODO(), unstructCRD, metav1.CreateOptions{}); err != nil {
+		return nil, fmt.Errorf("create CustomResourceDefinition: %w", err)
+	}
+	return func() error {
+		return f.DynamicClient.Resource(gvr).Delete(context.TODO(), item.GetName(), metav1.DeleteOptions{})
 	}, nil
 }
 

@@ -18,18 +18,26 @@ package validation
 
 import (
 	"fmt"
+	"strings"
+	"time"
 
-	"github.com/robfig/cron"
-
+	"github.com/robfig/cron/v3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	unversionedvalidation "k8s.io/apimachinery/pkg/apis/meta/v1/validation"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/sets"
 	apimachineryvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/kubernetes/pkg/apis/batch"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	apivalidation "k8s.io/kubernetes/pkg/apis/core/validation"
+	"k8s.io/utils/pointer"
 )
+
+// maxParallelismForIndexJob is the maximum parallelism that an Indexed Job
+// is allowed to have. This threshold allows to cap the length of
+// .status.completedIndexes.
+const maxParallelismForIndexedJob = 100000
 
 // ValidateGeneratedSelector validates that the generated selector on a controller object match the controller object
 // metadata, and the labels on the pod template are as generated.
@@ -78,12 +86,33 @@ func ValidateGeneratedSelector(obj *batch.Job) field.ErrorList {
 }
 
 // ValidateJob validates a Job and returns an ErrorList with any errors.
-func ValidateJob(job *batch.Job, opts apivalidation.PodValidationOptions) field.ErrorList {
+func ValidateJob(job *batch.Job, opts JobValidationOptions) field.ErrorList {
 	// Jobs and rcs have the same name validation
 	allErrs := apivalidation.ValidateObjectMeta(&job.ObjectMeta, true, apivalidation.ValidateReplicationControllerName, field.NewPath("metadata"))
 	allErrs = append(allErrs, ValidateGeneratedSelector(job)...)
-	allErrs = append(allErrs, ValidateJobSpec(&job.Spec, field.NewPath("spec"), opts)...)
+	allErrs = append(allErrs, ValidateJobSpec(&job.Spec, field.NewPath("spec"), opts.PodValidationOptions)...)
+	if !opts.AllowTrackingAnnotation && hasJobTrackingAnnotation(job) {
+		allErrs = append(allErrs, field.Forbidden(field.NewPath("metadata").Child("annotations").Key(batch.JobTrackingFinalizer), "cannot add this annotation"))
+	}
+	if job.Spec.CompletionMode != nil && *job.Spec.CompletionMode == batch.IndexedCompletion && job.Spec.Completions != nil && *job.Spec.Completions > 0 {
+		// For indexed job, the job controller appends a suffix (`-$INDEX`)
+		// to the pod hostname when indexed job create pods.
+		// The index could be maximum `.spec.completions-1`
+		// If we don't validate this here, the indexed job will fail to create pods later.
+		maximumPodHostname := fmt.Sprintf("%s-%d", job.ObjectMeta.Name, *job.Spec.Completions-1)
+		if errs := apimachineryvalidation.IsDNS1123Label(maximumPodHostname); len(errs) > 0 {
+			allErrs = append(allErrs, field.Invalid(field.NewPath("metadata").Child("name"), job.ObjectMeta.Name, fmt.Sprintf("will not able to create pod with invalid DNS label: %s", maximumPodHostname)))
+		}
+	}
 	return allErrs
+}
+
+func hasJobTrackingAnnotation(job *batch.Job) bool {
+	if job.Annotations == nil {
+		return false
+	}
+	_, ok := job.Annotations[batch.JobTrackingFinalizer]
+	return ok
 }
 
 // ValidateJobSpec validates a JobSpec and returns an ErrorList with any errors.
@@ -124,6 +153,20 @@ func validateJobSpec(spec *batch.JobSpec, fldPath *field.Path, opts apivalidatio
 	if spec.TTLSecondsAfterFinished != nil {
 		allErrs = append(allErrs, apivalidation.ValidateNonnegativeField(int64(*spec.TTLSecondsAfterFinished), fldPath.Child("ttlSecondsAfterFinished"))...)
 	}
+	// CompletionMode might be nil when IndexedJob feature gate is disabled.
+	if spec.CompletionMode != nil {
+		if *spec.CompletionMode != batch.NonIndexedCompletion && *spec.CompletionMode != batch.IndexedCompletion {
+			allErrs = append(allErrs, field.NotSupported(fldPath.Child("completionMode"), spec.CompletionMode, []string{string(batch.NonIndexedCompletion), string(batch.IndexedCompletion)}))
+		}
+		if *spec.CompletionMode == batch.IndexedCompletion {
+			if spec.Completions == nil {
+				allErrs = append(allErrs, field.Required(fldPath.Child("completions"), fmt.Sprintf("when completion mode is %s", batch.IndexedCompletion)))
+			}
+			if spec.Parallelism != nil && *spec.Parallelism > maxParallelismForIndexedJob {
+				allErrs = append(allErrs, field.Invalid(fldPath.Child("parallelism"), *spec.Parallelism, fmt.Sprintf("must be less than or equal to %d when completion mode is %s", maxParallelismForIndexedJob, batch.IndexedCompletion)))
+			}
+		}
+	}
 
 	allErrs = append(allErrs, apivalidation.ValidatePodTemplateSpec(&spec.Template, fldPath.Child("template"), opts)...)
 
@@ -140,17 +183,44 @@ func validateJobSpec(spec *batch.JobSpec, fldPath *field.Path, opts apivalidatio
 	return allErrs
 }
 
-// ValidateJobStatus validates a JobStatus and returns an ErrorList with any errors.
-func ValidateJobStatus(status *batch.JobStatus, fldPath *field.Path) field.ErrorList {
+// validateJobStatus validates a JobStatus and returns an ErrorList with any errors.
+func validateJobStatus(status *batch.JobStatus, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	allErrs = append(allErrs, apivalidation.ValidateNonnegativeField(int64(status.Active), fldPath.Child("active"))...)
 	allErrs = append(allErrs, apivalidation.ValidateNonnegativeField(int64(status.Succeeded), fldPath.Child("succeeded"))...)
 	allErrs = append(allErrs, apivalidation.ValidateNonnegativeField(int64(status.Failed), fldPath.Child("failed"))...)
+	if status.Ready != nil {
+		allErrs = append(allErrs, apivalidation.ValidateNonnegativeField(int64(*status.Ready), fldPath.Child("ready"))...)
+	}
+	if status.UncountedTerminatedPods != nil {
+		path := fldPath.Child("uncountedTerminatedPods")
+		seen := sets.NewString()
+		for i, k := range status.UncountedTerminatedPods.Succeeded {
+			p := path.Child("succeeded").Index(i)
+			if k == "" {
+				allErrs = append(allErrs, field.Invalid(p, k, "must not be empty"))
+			} else if seen.Has(string(k)) {
+				allErrs = append(allErrs, field.Duplicate(p, k))
+			} else {
+				seen.Insert(string(k))
+			}
+		}
+		for i, k := range status.UncountedTerminatedPods.Failed {
+			p := path.Child("failed").Index(i)
+			if k == "" {
+				allErrs = append(allErrs, field.Invalid(p, k, "must not be empty"))
+			} else if seen.Has(string(k)) {
+				allErrs = append(allErrs, field.Duplicate(p, k))
+			} else {
+				seen.Insert(string(k))
+			}
+		}
+	}
 	return allErrs
 }
 
 // ValidateJobUpdate validates an update to a Job and returns an ErrorList with any errors.
-func ValidateJobUpdate(job, oldJob *batch.Job, opts apivalidation.PodValidationOptions) field.ErrorList {
+func ValidateJobUpdate(job, oldJob *batch.Job, opts JobValidationOptions) field.ErrorList {
 	allErrs := apivalidation.ValidateObjectMetaUpdate(&job.ObjectMeta, &oldJob.ObjectMeta, field.NewPath("metadata"))
 	allErrs = append(allErrs, ValidateJobSpecUpdate(job.Spec, oldJob.Spec, field.NewPath("spec"), opts)...)
 	return allErrs
@@ -164,27 +234,57 @@ func ValidateJobUpdateStatus(job, oldJob *batch.Job) field.ErrorList {
 }
 
 // ValidateJobSpecUpdate validates an update to a JobSpec and returns an ErrorList with any errors.
-func ValidateJobSpecUpdate(spec, oldSpec batch.JobSpec, fldPath *field.Path, opts apivalidation.PodValidationOptions) field.ErrorList {
+func ValidateJobSpecUpdate(spec, oldSpec batch.JobSpec, fldPath *field.Path, opts JobValidationOptions) field.ErrorList {
 	allErrs := field.ErrorList{}
-	allErrs = append(allErrs, ValidateJobSpec(&spec, fldPath, opts)...)
+	allErrs = append(allErrs, ValidateJobSpec(&spec, fldPath, opts.PodValidationOptions)...)
 	allErrs = append(allErrs, apivalidation.ValidateImmutableField(spec.Completions, oldSpec.Completions, fldPath.Child("completions"))...)
 	allErrs = append(allErrs, apivalidation.ValidateImmutableField(spec.Selector, oldSpec.Selector, fldPath.Child("selector"))...)
-	allErrs = append(allErrs, apivalidation.ValidateImmutableField(spec.Template, oldSpec.Template, fldPath.Child("template"))...)
+	allErrs = append(allErrs, validatePodTemplateUpdate(spec, oldSpec, fldPath, opts)...)
+	allErrs = append(allErrs, apivalidation.ValidateImmutableField(spec.CompletionMode, oldSpec.CompletionMode, fldPath.Child("completionMode"))...)
+	return allErrs
+}
+
+func validatePodTemplateUpdate(spec, oldSpec batch.JobSpec, fldPath *field.Path, opts JobValidationOptions) field.ErrorList {
+	allErrs := field.ErrorList{}
+	template := &spec.Template
+	oldTemplate := &oldSpec.Template
+	if opts.AllowMutableSchedulingDirectives {
+		oldTemplate = oldSpec.Template.DeepCopy() // +k8s:verify-mutation:reason=clone
+		switch {
+		case template.Spec.Affinity == nil && oldTemplate.Spec.Affinity != nil:
+			// allow the Affinity field to be cleared if the old template had no affinity directives other than NodeAffinity
+			oldTemplate.Spec.Affinity.NodeAffinity = nil // +k8s:verify-mutation:reason=clone
+			if (*oldTemplate.Spec.Affinity) == (api.Affinity{}) {
+				oldTemplate.Spec.Affinity = nil // +k8s:verify-mutation:reason=clone
+			}
+		case template.Spec.Affinity != nil && oldTemplate.Spec.Affinity == nil:
+			// allow the NodeAffinity field to skip immutability checking
+			oldTemplate.Spec.Affinity = &api.Affinity{NodeAffinity: template.Spec.Affinity.NodeAffinity} // +k8s:verify-mutation:reason=clone
+		case template.Spec.Affinity != nil && oldTemplate.Spec.Affinity != nil:
+			// allow the NodeAffinity field to skip immutability checking
+			oldTemplate.Spec.Affinity.NodeAffinity = template.Spec.Affinity.NodeAffinity // +k8s:verify-mutation:reason=clone
+		}
+		oldTemplate.Spec.NodeSelector = template.Spec.NodeSelector // +k8s:verify-mutation:reason=clone
+		oldTemplate.Spec.Tolerations = template.Spec.Tolerations   // +k8s:verify-mutation:reason=clone
+		oldTemplate.Annotations = template.Annotations             // +k8s:verify-mutation:reason=clone
+		oldTemplate.Labels = template.Labels                       // +k8s:verify-mutation:reason=clone
+	}
+	allErrs = append(allErrs, apivalidation.ValidateImmutableField(template, oldTemplate, fldPath.Child("template"))...)
 	return allErrs
 }
 
 // ValidateJobStatusUpdate validates an update to a JobStatus and returns an ErrorList with any errors.
 func ValidateJobStatusUpdate(status, oldStatus batch.JobStatus) field.ErrorList {
 	allErrs := field.ErrorList{}
-	allErrs = append(allErrs, ValidateJobStatus(&status, field.NewPath("status"))...)
+	allErrs = append(allErrs, validateJobStatus(&status, field.NewPath("status"))...)
 	return allErrs
 }
 
-// ValidateCronJob validates a CronJob and returns an ErrorList with any errors.
-func ValidateCronJob(cronJob *batch.CronJob, opts apivalidation.PodValidationOptions) field.ErrorList {
+// ValidateCronJobCreate validates a CronJob on creation and returns an ErrorList with any errors.
+func ValidateCronJobCreate(cronJob *batch.CronJob, opts apivalidation.PodValidationOptions) field.ErrorList {
 	// CronJobs and rcs have the same name validation
 	allErrs := apivalidation.ValidateObjectMeta(&cronJob.ObjectMeta, true, apivalidation.ValidateReplicationControllerName, field.NewPath("metadata"))
-	allErrs = append(allErrs, ValidateCronJobSpec(&cronJob.Spec, field.NewPath("spec"), opts)...)
+	allErrs = append(allErrs, validateCronJobSpec(&cronJob.Spec, nil, field.NewPath("spec"), opts)...)
 	if len(cronJob.ObjectMeta.Name) > apimachineryvalidation.DNS1035LabelMaxLength-11 {
 		// The cronjob controller appends a 11-character suffix to the cronjob (`-$TIMESTAMP`) when
 		// creating a job. The job name length limit is 63 characters.
@@ -198,24 +298,31 @@ func ValidateCronJob(cronJob *batch.CronJob, opts apivalidation.PodValidationOpt
 // ValidateCronJobUpdate validates an update to a CronJob and returns an ErrorList with any errors.
 func ValidateCronJobUpdate(job, oldJob *batch.CronJob, opts apivalidation.PodValidationOptions) field.ErrorList {
 	allErrs := apivalidation.ValidateObjectMetaUpdate(&job.ObjectMeta, &oldJob.ObjectMeta, field.NewPath("metadata"))
-	allErrs = append(allErrs, ValidateCronJobSpec(&job.Spec, field.NewPath("spec"), opts)...)
+	allErrs = append(allErrs, validateCronJobSpec(&job.Spec, &oldJob.Spec, field.NewPath("spec"), opts)...)
+
 	// skip the 52-character name validation limit on update validation
 	// to allow old cronjobs with names > 52 chars to be updated/deleted
 	return allErrs
 }
 
-// ValidateCronJobSpec validates a CronJobSpec and returns an ErrorList with any errors.
-func ValidateCronJobSpec(spec *batch.CronJobSpec, fldPath *field.Path, opts apivalidation.PodValidationOptions) field.ErrorList {
+// validateCronJobSpec validates a CronJobSpec and returns an ErrorList with any errors.
+func validateCronJobSpec(spec, oldSpec *batch.CronJobSpec, fldPath *field.Path, opts apivalidation.PodValidationOptions) field.ErrorList {
 	allErrs := field.ErrorList{}
 
 	if len(spec.Schedule) == 0 {
 		allErrs = append(allErrs, field.Required(fldPath.Child("schedule"), ""))
 	} else {
-		allErrs = append(allErrs, validateScheduleFormat(spec.Schedule, fldPath.Child("schedule"))...)
+		allErrs = append(allErrs, validateScheduleFormat(spec.Schedule, spec.TimeZone, fldPath.Child("schedule"))...)
 	}
+
 	if spec.StartingDeadlineSeconds != nil {
 		allErrs = append(allErrs, apivalidation.ValidateNonnegativeField(int64(*spec.StartingDeadlineSeconds), fldPath.Child("startingDeadlineSeconds"))...)
 	}
+
+	if oldSpec == nil || !pointer.StringEqual(oldSpec.TimeZone, spec.TimeZone) {
+		allErrs = append(allErrs, validateTimeZone(spec.TimeZone, fldPath.Child("timeZone"))...)
+	}
+
 	allErrs = append(allErrs, validateConcurrencyPolicy(&spec.ConcurrencyPolicy, fldPath.Child("concurrencyPolicy"))...)
 	allErrs = append(allErrs, ValidateJobTemplateSpec(&spec.JobTemplate, fldPath.Child("jobTemplate"), opts)...)
 
@@ -246,10 +353,35 @@ func validateConcurrencyPolicy(concurrencyPolicy *batch.ConcurrencyPolicy, fldPa
 	return allErrs
 }
 
-func validateScheduleFormat(schedule string, fldPath *field.Path) field.ErrorList {
+func validateScheduleFormat(schedule string, timeZone *string, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	if _, err := cron.ParseStandard(schedule); err != nil {
 		allErrs = append(allErrs, field.Invalid(fldPath, schedule, err.Error()))
+	}
+	if strings.Contains(schedule, "TZ") && timeZone != nil {
+		allErrs = append(allErrs, field.Invalid(fldPath, schedule, "cannot use both timeZone field and TZ or CRON_TZ in schedule"))
+	}
+
+	return allErrs
+}
+
+func validateTimeZone(timeZone *string, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if timeZone == nil {
+		return allErrs
+	}
+
+	if len(*timeZone) == 0 {
+		allErrs = append(allErrs, field.Invalid(fldPath, timeZone, "timeZone must be nil or non-empty string"))
+		return allErrs
+	}
+
+	if strings.EqualFold(*timeZone, "Local") {
+		allErrs = append(allErrs, field.Invalid(fldPath, timeZone, "timeZone must be an explicit time zone as defined in https://www.iana.org/time-zones"))
+	}
+
+	if _, err := time.LoadLocation(*timeZone); err != nil {
+		allErrs = append(allErrs, field.Invalid(fldPath, timeZone, err.Error()))
 	}
 
 	return allErrs
@@ -275,4 +407,12 @@ func ValidateJobTemplateSpec(spec *batch.JobTemplateSpec, fldPath *field.Path, o
 		allErrs = append(allErrs, field.NotSupported(fldPath.Child("spec", "manualSelector"), spec.Spec.ManualSelector, []string{"nil", "false"}))
 	}
 	return allErrs
+}
+
+type JobValidationOptions struct {
+	apivalidation.PodValidationOptions
+	// Allow Job to have the annotation batch.kubernetes.io/job-tracking
+	AllowTrackingAnnotation bool
+	// Allow mutable node affinity, selector and tolerations of the template
+	AllowMutableSchedulingDirectives bool
 }

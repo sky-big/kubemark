@@ -22,7 +22,7 @@ import (
 	"sync"
 	"time"
 
-	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
+	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 )
 
 var (
@@ -63,10 +63,13 @@ type FakeRuntimeService struct {
 	Called []string
 	Errors map[string][]error
 
-	FakeStatus         *runtimeapi.RuntimeStatus
-	Containers         map[string]*FakeContainer
-	Sandboxes          map[string]*FakePodSandbox
-	FakeContainerStats map[string]*runtimeapi.ContainerStats
+	FakeStatus          *runtimeapi.RuntimeStatus
+	Containers          map[string]*FakeContainer
+	Sandboxes           map[string]*FakePodSandbox
+	FakeContainerStats  map[string]*runtimeapi.ContainerStats
+	FakePodSandboxStats map[string]*runtimeapi.PodSandboxStats
+
+	ErrorOnSandboxCreate bool
 }
 
 // GetContainerID returns the unique container ID from the FakeRuntimeService.
@@ -149,11 +152,12 @@ func (r *FakeRuntimeService) popError(f string) error {
 // NewFakeRuntimeService creates a new FakeRuntimeService.
 func NewFakeRuntimeService() *FakeRuntimeService {
 	return &FakeRuntimeService{
-		Called:             make([]string, 0),
-		Errors:             make(map[string][]error),
-		Containers:         make(map[string]*FakeContainer),
-		Sandboxes:          make(map[string]*FakePodSandbox),
-		FakeContainerStats: make(map[string]*runtimeapi.ContainerStats),
+		Called:              make([]string, 0),
+		Errors:              make(map[string][]error),
+		Containers:          make(map[string]*FakeContainer),
+		Sandboxes:           make(map[string]*FakePodSandbox),
+		FakeContainerStats:  make(map[string]*runtimeapi.ContainerStats),
+		FakePodSandboxStats: make(map[string]*runtimeapi.PodSandboxStats),
 	}
 }
 
@@ -176,7 +180,7 @@ func (r *FakeRuntimeService) Version(apiVersion string) (*runtimeapi.VersionResp
 }
 
 // Status returns runtime status of the FakeRuntimeService.
-func (r *FakeRuntimeService) Status() (*runtimeapi.RuntimeStatus, error) {
+func (r *FakeRuntimeService) Status(verbose bool) (*runtimeapi.StatusResponse, error) {
 	r.Lock()
 	defer r.Unlock()
 
@@ -185,7 +189,7 @@ func (r *FakeRuntimeService) Status() (*runtimeapi.RuntimeStatus, error) {
 		return nil, err
 	}
 
-	return r.FakeStatus, nil
+	return &runtimeapi.StatusResponse{Status: r.FakeStatus}, nil
 }
 
 // RunPodSandbox emulates the run of the pod sandbox in the FakeRuntimeService.
@@ -196,6 +200,10 @@ func (r *FakeRuntimeService) RunPodSandbox(config *runtimeapi.PodSandboxConfig, 
 	r.Called = append(r.Called, "RunPodSandbox")
 	if err := r.popError("RunPodSandbox"); err != nil {
 		return "", err
+	}
+
+	if r.ErrorOnSandboxCreate {
+		return "", fmt.Errorf("error on sandbox create")
 	}
 
 	// PodSandboxID should be randomized for real container runtime, but here just use
@@ -273,7 +281,7 @@ func (r *FakeRuntimeService) RemovePodSandbox(podSandboxID string) error {
 }
 
 // PodSandboxStatus returns pod sandbox status from the FakeRuntimeService.
-func (r *FakeRuntimeService) PodSandboxStatus(podSandboxID string) (*runtimeapi.PodSandboxStatus, error) {
+func (r *FakeRuntimeService) PodSandboxStatus(podSandboxID string, verbose bool) (*runtimeapi.PodSandboxStatusResponse, error) {
 	r.Lock()
 	defer r.Unlock()
 
@@ -288,7 +296,7 @@ func (r *FakeRuntimeService) PodSandboxStatus(podSandboxID string) (*runtimeapi.
 	}
 
 	status := s.PodSandboxStatus
-	return &status, nil
+	return &runtimeapi.PodSandboxStatusResponse{Status: &status}, nil
 }
 
 // ListPodSandbox returns the list of pod sandboxes in the FakeRuntimeService.
@@ -482,7 +490,7 @@ func (r *FakeRuntimeService) ListContainers(filter *runtimeapi.ContainerFilter) 
 }
 
 // ContainerStatus returns the container status given the container ID in FakeRuntimeService.
-func (r *FakeRuntimeService) ContainerStatus(containerID string) (*runtimeapi.ContainerStatus, error) {
+func (r *FakeRuntimeService) ContainerStatus(containerID string, verbose bool) (*runtimeapi.ContainerStatusResponse, error) {
 	r.Lock()
 	defer r.Unlock()
 
@@ -497,7 +505,7 @@ func (r *FakeRuntimeService) ContainerStatus(containerID string) (*runtimeapi.Co
 	}
 
 	status := c.ContainerStatus
-	return &status, nil
+	return &runtimeapi.ContainerStatusResponse{Status: &status}, nil
 }
 
 // UpdateContainerResources returns the container resource in the FakeRuntimeService.
@@ -606,6 +614,64 @@ func (r *FakeRuntimeService) ListContainerStats(filter *runtimeapi.ContainerStat
 			}
 		}
 		s, found := r.FakeContainerStats[c.Id]
+		if !found {
+			continue
+		}
+		result = append(result, s)
+	}
+
+	return result, nil
+}
+
+// SetFakePodSandboxStats sets the fake pod sandbox stats in the FakeRuntimeService.
+func (r *FakeRuntimeService) SetFakePodSandboxStats(podStats []*runtimeapi.PodSandboxStats) {
+	r.Lock()
+	defer r.Unlock()
+
+	r.FakePodSandboxStats = make(map[string]*runtimeapi.PodSandboxStats)
+	for _, s := range podStats {
+		r.FakePodSandboxStats[s.Attributes.Id] = s
+	}
+}
+
+// PodSandboxStats returns the sandbox stats in the FakeRuntimeService.
+func (r *FakeRuntimeService) PodSandboxStats(podSandboxID string) (*runtimeapi.PodSandboxStats, error) {
+	r.Lock()
+	defer r.Unlock()
+
+	r.Called = append(r.Called, "PodSandboxStats")
+	if err := r.popError("PodSandboxStats"); err != nil {
+		return nil, err
+	}
+
+	s, found := r.FakePodSandboxStats[podSandboxID]
+	if !found {
+		return nil, fmt.Errorf("no stats for pod sandbox %q", podSandboxID)
+	}
+	return s, nil
+}
+
+// ListPodSandboxStats returns the list of all pod sandbox stats given the filter in the FakeRuntimeService.
+func (r *FakeRuntimeService) ListPodSandboxStats(filter *runtimeapi.PodSandboxStatsFilter) ([]*runtimeapi.PodSandboxStats, error) {
+	r.Lock()
+	defer r.Unlock()
+
+	r.Called = append(r.Called, "ListPodSandboxStats")
+	if err := r.popError("ListPodSandboxStats"); err != nil {
+		return nil, err
+	}
+
+	var result []*runtimeapi.PodSandboxStats
+	for _, sb := range r.Sandboxes {
+		if filter != nil {
+			if filter.Id != "" && filter.Id != sb.Id {
+				continue
+			}
+			if filter.LabelSelector != nil && !filterInLabels(filter.LabelSelector, sb.GetLabels()) {
+				continue
+			}
+		}
+		s, found := r.FakePodSandboxStats[sb.Id]
 		if !found {
 			continue
 		}

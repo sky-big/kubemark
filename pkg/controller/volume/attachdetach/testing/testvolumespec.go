@@ -216,7 +216,7 @@ func NewPod(uid, name string) *v1.Pod {
 	}
 }
 
-// NewPod returns a test pod object
+// NewPodWithVolume returns a test pod object
 func NewPodWithVolume(podName, volumeName, nodeName string) *v1.Pod {
 	return &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -544,7 +544,7 @@ func (attacher *testPluginAttacher) GetDeviceMountPath(spec *volume.Spec) (strin
 	return "", nil
 }
 
-func (attacher *testPluginAttacher) MountDevice(spec *volume.Spec, devicePath string, deviceMountPath string) error {
+func (attacher *testPluginAttacher) MountDevice(spec *volume.Spec, devicePath string, deviceMountPath string, _ volume.DeviceMounterArgs) error {
 	attacher.pluginLock.Lock()
 	defer attacher.pluginLock.Unlock()
 	if spec == nil {

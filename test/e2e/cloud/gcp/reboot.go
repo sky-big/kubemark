@@ -29,13 +29,13 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
 	clientset "k8s.io/client-go/kubernetes"
-	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	e2essh "k8s.io/kubernetes/test/e2e/framework/ssh"
 	testutils "k8s.io/kubernetes/test/utils"
+	admissionapi "k8s.io/pod-security-admission/api"
 
 	"github.com/onsi/ginkgo"
 )
@@ -92,6 +92,7 @@ var _ = SIGDescribe("Reboot [Disruptive] [Feature:Reboot]", func() {
 	})
 
 	f = framework.NewDefaultFramework("reboot")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 
 	ginkgo.It("each node by ordering clean reboot and ensure they function upon restart", func() {
 		// clean shutdown and restart
@@ -228,19 +229,19 @@ func printStatusAndLogsForNotReadyPods(c clientset.Interface, ns string, podName
 }
 
 // rebootNode takes node name on provider through the following steps using c:
-//  - ensures the node is ready
-//  - ensures all pods on the node are running and ready
-//  - reboots the node (by executing rebootCmd over ssh)
-//  - ensures the node reaches some non-ready state
-//  - ensures the node becomes ready again
-//  - ensures all pods on the node become running and ready again
+//   - ensures the node is ready
+//   - ensures all pods on the node are running and ready
+//   - reboots the node (by executing rebootCmd over ssh)
+//   - ensures the node reaches some non-ready state
+//   - ensures the node becomes ready again
+//   - ensures all pods on the node become running and ready again
 //
 // It returns true through result only if all of the steps pass; at the first
 // failed step, it will return false through result and not run the rest.
 func rebootNode(c clientset.Interface, provider, name, rebootCmd string) bool {
 	// Setup
 	ns := metav1.NamespaceSystem
-	ps, err := testutils.NewPodStore(c, ns, labels.Everything(), fields.OneTermEqualSelector(api.PodHostField, name))
+	ps, err := testutils.NewPodStore(c, ns, labels.Everything(), fields.OneTermEqualSelector("spec.nodeName", name))
 	if err != nil {
 		framework.Logf("Couldn't initialize pod store: %v", err)
 		return false

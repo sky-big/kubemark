@@ -1,3 +1,4 @@
+//go:build linux
 // +build linux
 
 /*
@@ -797,8 +798,8 @@ COMMIT
 		t.Fatalf("%s: Expected success, got %v", protocol, err)
 	}
 
-	if string(buffer.Bytes()) != output {
-		t.Errorf("%s: Expected output '%s', got '%v'", protocol, output, string(buffer.Bytes()))
+	if buffer.String() != output {
+		t.Errorf("%s: Expected output '%s', got '%v'", protocol, output, buffer.String())
 	}
 
 	if fcmd.CombinedOutputCalls != 1 {
@@ -817,8 +818,8 @@ COMMIT
 	if err == nil {
 		t.Errorf("%s: Expected failure", protocol)
 	}
-	if string(buffer.Bytes()) != stderrOutput {
-		t.Errorf("%s: Expected output '%s', got '%v'", protocol, stderrOutput, string(buffer.Bytes()))
+	if buffer.String() != stderrOutput {
+		t.Errorf("%s: Expected output '%s', got '%v'", protocol, stderrOutput, buffer.String())
 	}
 }
 
@@ -1025,6 +1026,9 @@ func TestRestoreAllWaitOldIptablesRestore(t *testing.T) {
 		},
 	}
 	lockPath14x, lockPath16x := getLockPaths()
+	// the lockPath14x is a UNIX socket which is cleaned up automatically on close, but the
+	// lockPath16x is a plain file which is not cleaned up.
+	defer os.Remove(lockPath16x)
 	runner := newInternal(&fexec, ProtocolIPv4, lockPath14x, lockPath16x)
 
 	err := runner.RestoreAll([]byte{}, NoFlushTables, RestoreCounters)
@@ -1077,7 +1081,10 @@ func TestRestoreAllGrabNewLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected to open %s, got %v", lockPath16x, err)
 	}
-	defer runLock.Close()
+	defer func() {
+		runLock.Close()
+		os.Remove(lockPath16x)
+	}()
 
 	if err := grabIptablesFileLock(runLock); err != nil {
 		t.Errorf("expected to lock %s, got %v", lockPath16x, err)
@@ -1111,6 +1118,9 @@ func TestRestoreAllGrabOldLock(t *testing.T) {
 		},
 	}
 	lockPath14x, lockPath16x := getLockPaths()
+	// the lockPath14x is a UNIX socket which is cleaned up automatically on close, but the
+	// lockPath16x is a plain file which is not cleaned up.
+	defer os.Remove(lockPath16x)
 	runner := newInternal(&fexec, ProtocolIPv4, lockPath14x, lockPath16x)
 
 	var runLock *net.UnixListener
@@ -1186,5 +1196,65 @@ func TestRestoreAllWaitBackportedIptablesRestore(t *testing.T) {
 	err = runner.Restore(TableNAT, []byte{}, FlushTables, RestoreCounters)
 	if err == nil {
 		t.Errorf("expected failure")
+	}
+}
+
+// TestExtractLines tests that
+func TestExtractLines(t *testing.T) {
+	mkLines := func(lines ...LineData) []LineData {
+		return lines
+	}
+	lines := "Line1: 1\nLine2: 2\nLine3: 3\nLine4: 4\nLine5: 5\nLine6: 6\nLine7: 7\nLine8: 8\nLine9: 9\nLine10: 10"
+	tests := []struct {
+		count int
+		line  int
+		name  string
+		want  []LineData
+	}{{
+		name:  "test-line-0",
+		count: 3,
+		line:  0,
+		want:  nil,
+	}, {
+		name:  "test-count-0",
+		count: 0,
+		line:  3,
+		want:  mkLines(LineData{3, "Line3: 3"}),
+	}, {
+		name:  "test-common-cases",
+		count: 3,
+		line:  6,
+		want: mkLines(
+			LineData{3, "Line3: 3"},
+			LineData{4, "Line4: 4"},
+			LineData{5, "Line5: 5"},
+			LineData{6, "Line6: 6"},
+			LineData{7, "Line7: 7"},
+			LineData{8, "Line8: 8"},
+			LineData{9, "Line9: 9"}),
+	}, {
+		name:  "test4-bound-cases",
+		count: 11,
+		line:  10,
+		want: mkLines(
+			LineData{1, "Line1: 1"},
+			LineData{2, "Line2: 2"},
+			LineData{3, "Line3: 3"},
+			LineData{4, "Line4: 4"},
+			LineData{5, "Line5: 5"},
+			LineData{6, "Line6: 6"},
+			LineData{7, "Line7: 7"},
+			LineData{8, "Line8: 8"},
+			LineData{9, "Line9: 9"},
+			LineData{10, "Line10: 10"}),
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractLines([]byte(lines), tt.line, tt.count)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("got = %v, want = %v", got, tt.want)
+			}
+		})
 	}
 }

@@ -123,7 +123,7 @@ func (c *Repair) runOnce() error {
 		return fmt.Errorf("unable to refresh the port block: %v", err)
 	}
 
-	rebuilt, err := portallocator.NewPortAllocator(c.portRange)
+	rebuilt, err := portallocator.NewInMemory(c.portRange)
 	if err != nil {
 		return fmt.Errorf("unable to create port allocator: %v", err)
 	}
@@ -203,8 +203,8 @@ func (c *Repair) runOnce() error {
 
 // collectServiceNodePorts returns nodePorts specified in the Service.
 // Please note that:
-//   1. same nodePort with *same* protocol will be duplicated as it is
-//   2. same nodePort with *different* protocol will be deduplicated
+//  1. same nodePort with *same* protocol will be duplicated as it is
+//  2. same nodePort with *different* protocol will be deduplicated
 func collectServiceNodePorts(service *corev1.Service) []int {
 	var servicePorts []int
 	// map from nodePort to set of protocols

@@ -33,6 +33,7 @@ import (
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
+	admissionapi "k8s.io/pod-security-admission/api"
 
 	"github.com/onsi/ginkgo"
 )
@@ -47,6 +48,7 @@ const (
 
 var _ = SIGDescribe("DNS horizontal autoscaling", func() {
 	f := framework.NewDefaultFramework("dns-autoscaling")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	var c clientset.Interface
 	var previousParams map[string]string
 	var originDNSReplicasCount int
@@ -166,8 +168,7 @@ var _ = SIGDescribe("DNS horizontal autoscaling", func() {
 		framework.ExpectNoError(err)
 	})
 
-	// TODO: Get rid of [DisabledForLargeClusters] tag when issue #55779 is fixed.
-	ginkgo.It("[DisabledForLargeClusters] kube-dns-autoscaler should scale kube-dns pods in both nonfaulty and faulty scenarios", func() {
+	ginkgo.It("kube-dns-autoscaler should scale kube-dns pods in both nonfaulty and faulty scenarios", func() {
 
 		ginkgo.By("Replace the dns autoscaling parameters with testing parameters")
 		err := updateDNSScalingConfigMap(c, packDNSScalingConfigMap(packLinearParams(&DNSParams1)))
@@ -237,32 +238,26 @@ func getExpectReplicasFuncLinear(c clientset.Interface, params *DNSParamsLinear)
 	return func(c clientset.Interface) int {
 		var replicasFromNodes float64
 		var replicasFromCores float64
-		nodes, err := e2enode.GetReadySchedulableNodes(c)
+		nodes, err := e2enode.GetReadyNodesIncludingTainted(c)
 		framework.ExpectNoError(err)
 		if params.nodesPerReplica > 0 {
 			replicasFromNodes = math.Ceil(float64(len(nodes.Items)) / params.nodesPerReplica)
 		}
 		if params.coresPerReplica > 0 {
-			replicasFromCores = math.Ceil(float64(getScheduableCores(nodes.Items)) / params.coresPerReplica)
+			replicasFromCores = math.Ceil(float64(getSchedulableCores(nodes.Items)) / params.coresPerReplica)
 		}
 		return int(math.Max(1.0, math.Max(replicasFromNodes, replicasFromCores)))
 	}
 }
 
-func getScheduableCores(nodes []v1.Node) int64 {
+func getSchedulableCores(nodes []v1.Node) int64 {
 	var sc resource.Quantity
 	for _, node := range nodes {
 		if !node.Spec.Unschedulable {
-			sc.Add(node.Status.Capacity[v1.ResourceCPU])
+			sc.Add(node.Status.Allocatable[v1.ResourceCPU])
 		}
 	}
-
-	scInt64, scOk := sc.AsInt64()
-	if !scOk {
-		framework.Logf("Unable to compute integer values of schedulable cores in the cluster")
-		return 0
-	}
-	return scInt64
+	return sc.Value()
 }
 
 func fetchDNSScalingConfigMap(c clientset.Interface) (*v1.ConfigMap, error) {

@@ -29,9 +29,8 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/onsi/ginkgo"
-	"github.com/onsi/gomega"
 	v1 "k8s.io/api/core/v1"
-	policyv1beta1 "k8s.io/api/policy/v1beta1"
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -49,6 +48,7 @@ import (
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	"k8s.io/kubernetes/test/e2e/storage/utils"
 	imageutils "k8s.io/kubernetes/test/utils/image"
+	admissionapi "k8s.io/pod-security-admission/api"
 )
 
 const (
@@ -60,7 +60,7 @@ const (
 	minNodes            = 2
 )
 
-var _ = utils.SIGDescribe("Pod Disks", func() {
+var _ = utils.SIGDescribe("Pod Disks [Feature:StorageProvider]", func() {
 	var (
 		ns         string
 		cs         clientset.Interface
@@ -71,6 +71,7 @@ var _ = utils.SIGDescribe("Pod Disks", func() {
 		nodes      *v1.NodeList
 	)
 	f := framework.NewDefaultFramework("pod-disks")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 
 	ginkgo.BeforeEach(func() {
 		e2eskipper.SkipUnlessNodeCountIsAtLeast(minNodes)
@@ -84,7 +85,9 @@ var _ = utils.SIGDescribe("Pod Disks", func() {
 		var err error
 		nodes, err = e2enode.GetReadySchedulableNodes(cs)
 		framework.ExpectNoError(err)
-		gomega.Expect(len(nodes.Items)).To(gomega.BeNumerically(">=", minNodes), fmt.Sprintf("Requires at least %d nodes", minNodes))
+		if len(nodes.Items) < minNodes {
+			e2eskipper.Skipf("The test requires %d schedulable nodes, got only %d", minNodes, len(nodes.Items))
+		}
 		host0Name = types.NodeName(nodes.Items[0].ObjectMeta.Name)
 		host1Name = types.NodeName(nodes.Items[1].ObjectMeta.Name)
 	})
@@ -148,7 +151,7 @@ var _ = utils.SIGDescribe("Pod Disks", func() {
 					fmtPod = testPDPod([]string{diskName}, host0Name, false, 1)
 					_, err = podClient.Create(context.TODO(), fmtPod, metav1.CreateOptions{})
 					framework.ExpectNoError(err, "Failed to create fmtPod")
-					framework.ExpectNoError(e2epod.WaitForPodRunningInNamespaceSlow(f.ClientSet, fmtPod.Name, f.Namespace.Name))
+					framework.ExpectNoError(e2epod.WaitTimeoutForPodRunningInNamespace(f.ClientSet, fmtPod.Name, f.Namespace.Name, f.Timeouts.PodStartSlow))
 
 					ginkgo.By("deleting the fmtPod")
 					framework.ExpectNoError(podClient.Delete(context.TODO(), fmtPod.Name, *metav1.NewDeleteOptions(0)), "Failed to delete fmtPod")
@@ -176,7 +179,7 @@ var _ = utils.SIGDescribe("Pod Disks", func() {
 				ginkgo.By("creating host0Pod on node0")
 				_, err = podClient.Create(context.TODO(), host0Pod, metav1.CreateOptions{})
 				framework.ExpectNoError(err, fmt.Sprintf("Failed to create host0Pod: %v", err))
-				framework.ExpectNoError(e2epod.WaitForPodRunningInNamespaceSlow(f.ClientSet, host0Pod.Name, f.Namespace.Name))
+				framework.ExpectNoError(e2epod.WaitTimeoutForPodRunningInNamespace(f.ClientSet, host0Pod.Name, f.Namespace.Name, f.Timeouts.PodStartSlow))
 				framework.Logf("host0Pod: %q, node0: %q", host0Pod.Name, host0Name)
 
 				var containerName, testFile, testFileContents string
@@ -200,7 +203,7 @@ var _ = utils.SIGDescribe("Pod Disks", func() {
 				ginkgo.By("creating host1Pod on node1")
 				_, err = podClient.Create(context.TODO(), host1Pod, metav1.CreateOptions{})
 				framework.ExpectNoError(err, "Failed to create host1Pod")
-				framework.ExpectNoError(e2epod.WaitForPodRunningInNamespaceSlow(f.ClientSet, host1Pod.Name, f.Namespace.Name))
+				framework.ExpectNoError(e2epod.WaitTimeoutForPodRunningInNamespace(f.ClientSet, host1Pod.Name, f.Namespace.Name, f.Timeouts.PodStartSlow))
 				framework.Logf("host1Pod: %q, node1: %q", host1Pod.Name, host1Name)
 
 				if readOnly {
@@ -282,7 +285,7 @@ var _ = utils.SIGDescribe("Pod Disks", func() {
 					host0Pod = testPDPod(diskNames, host0Name, false /* readOnly */, numContainers)
 					_, err = podClient.Create(context.TODO(), host0Pod, metav1.CreateOptions{})
 					framework.ExpectNoError(err, fmt.Sprintf("Failed to create host0Pod: %v", err))
-					framework.ExpectNoError(e2epod.WaitForPodRunningInNamespaceSlow(f.ClientSet, host0Pod.Name, f.Namespace.Name))
+					framework.ExpectNoError(e2epod.WaitTimeoutForPodRunningInNamespace(f.ClientSet, host0Pod.Name, f.Namespace.Name, f.Timeouts.PodStartSlow))
 
 					ginkgo.By(fmt.Sprintf("writing %d file(s) via a container", numPDs))
 					containerName := "mycontainer"
@@ -385,7 +388,7 @@ var _ = utils.SIGDescribe("Pod Disks", func() {
 				_, err = podClient.Create(context.TODO(), host0Pod, metav1.CreateOptions{})
 				framework.ExpectNoError(err, fmt.Sprintf("Failed to create host0Pod: %v", err))
 				ginkgo.By("waiting for host0Pod to be running")
-				framework.ExpectNoError(e2epod.WaitForPodRunningInNamespaceSlow(f.ClientSet, host0Pod.Name, f.Namespace.Name))
+				framework.ExpectNoError(e2epod.WaitTimeoutForPodRunningInNamespace(f.ClientSet, host0Pod.Name, f.Namespace.Name, f.Timeouts.PodStartSlow))
 
 				ginkgo.By("writing content to host0Pod")
 				testFile := "/testpd1/tracker"
@@ -422,7 +425,7 @@ var _ = utils.SIGDescribe("Pod Disks", func() {
 					framework.ExpectNoError(podClient.Delete(context.TODO(), host0Pod.Name, *metav1.NewDeleteOptions(0)), "Unable to delete host0Pod")
 
 				} else if disruptOp == evictPod {
-					evictTarget := &policyv1beta1.Eviction{
+					evictTarget := &policyv1.Eviction{
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      host0Pod.Name,
 							Namespace: ns,
@@ -430,7 +433,7 @@ var _ = utils.SIGDescribe("Pod Disks", func() {
 					}
 					ginkgo.By("evicting host0Pod")
 					err = wait.PollImmediate(framework.Poll, podEvictTimeout, func() (bool, error) {
-						if err := cs.CoreV1().Pods(ns).Evict(context.TODO(), evictTarget); err != nil {
+						if err := cs.CoreV1().Pods(ns).EvictV1(context.TODO(), evictTarget); err != nil {
 							framework.Logf("Failed to evict host0Pod, ignoring error: %v", err)
 							return false, nil
 						}
@@ -474,7 +477,7 @@ var _ = utils.SIGDescribe("Pod Disks", func() {
 		ginkgo.By("Creating test pod with same volume")
 		_, err = podClient.Create(context.TODO(), pod, metav1.CreateOptions{})
 		framework.ExpectNoError(err, "Failed to create pod")
-		framework.ExpectNoError(e2epod.WaitForPodRunningInNamespaceSlow(f.ClientSet, pod.Name, f.Namespace.Name))
+		framework.ExpectNoError(e2epod.WaitTimeoutForPodRunningInNamespace(f.ClientSet, pod.Name, f.Namespace.Name, f.Timeouts.PodStartSlow))
 
 		ginkgo.By("deleting the pod")
 		framework.ExpectNoError(podClient.Delete(context.TODO(), pod.Name, *metav1.NewDeleteOptions(0)), "Failed to delete pod")
@@ -595,7 +598,7 @@ func testPDPod(diskNames []string, targetNode types.NodeName, readOnly bool, num
 		if numContainers > 1 {
 			containers[i].Name = fmt.Sprintf("mycontainer%v", i+1)
 		}
-		containers[i].Image = imageutils.GetE2EImage(imageutils.BusyBox)
+		containers[i].Image = e2epod.GetTestImage(imageutils.BusyBox)
 		containers[i].Command = []string{"sleep", "6000"}
 		containers[i].VolumeMounts = make([]v1.VolumeMount, len(diskNames))
 		for k := range diskNames {
@@ -635,7 +638,7 @@ func testPDPod(diskNames []string, targetNode types.NodeName, readOnly bool, num
 			pod.Spec.Volumes[k].VolumeSource = v1.VolumeSource{
 				GCEPersistentDisk: &v1.GCEPersistentDiskVolumeSource{
 					PDName:   diskName,
-					FSType:   "ext4",
+					FSType:   e2epv.GetDefaultFSType(),
 					ReadOnly: readOnly,
 				},
 			}

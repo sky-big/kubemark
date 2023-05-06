@@ -1,3 +1,4 @@
+//go:build linux
 // +build linux
 
 /*
@@ -29,6 +30,7 @@ import (
 	e2ekubelet "k8s.io/kubernetes/test/e2e/framework/kubelet"
 	e2eperf "k8s.io/kubernetes/test/e2e/framework/perf"
 	imageutils "k8s.io/kubernetes/test/utils/image"
+	admissionapi "k8s.io/pod-security-admission/api"
 
 	"github.com/onsi/ginkgo"
 )
@@ -45,6 +47,7 @@ var _ = SIGDescribe("Resource-usage [Serial] [Slow]", func() {
 	)
 
 	f := framework.NewDefaultFramework("resource-usage")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 
 	ginkgo.BeforeEach(func() {
 		om = e2ekubelet.NewRuntimeOperationMonitor(f.ClientSet)
@@ -169,7 +172,7 @@ func runResourceUsageTest(f *framework.Framework, rc *ResourceCollector, testArg
 	// entries if we plan to monitor longer (e.g., 8 hours).
 	deadline := time.Now().Add(monitoringTime)
 	for time.Now().Before(deadline) {
-		timeLeft := deadline.Sub(time.Now())
+		timeLeft := time.Until(deadline)
 		framework.Logf("Still running...%v left", timeLeft)
 		if timeLeft < reportingPeriod {
 			time.Sleep(timeLeft)

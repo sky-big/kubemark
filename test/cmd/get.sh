@@ -108,7 +108,7 @@ run_kubectl_get_tests() {
   kube::test::if_has_string "${output_message}" "/apis/apps/v1/namespaces/default/deployments 200 OK"
   kube::test::if_has_string "${output_message}" "/apis/apps/v1/namespaces/default/replicasets 200 OK"
   kube::test::if_has_string "${output_message}" "/apis/apps/v1/namespaces/default/statefulsets 200 OK"
-  kube::test::if_has_string "${output_message}" "/apis/autoscaling/v1/namespaces/default/horizontalpodautoscalers 200"
+  kube::test::if_has_string "${output_message}" "/apis/autoscaling/v2/namespaces/default/horizontalpodautoscalers 200"
   kube::test::if_has_string "${output_message}" "/apis/batch/v1/namespaces/default/jobs 200 OK"
   kube::test::if_has_not_string "${output_message}" "/apis/extensions/v1beta1/namespaces/default/daemonsets 200 OK"
   kube::test::if_has_not_string "${output_message}" "/apis/extensions/v1beta1/namespaces/default/deployments 200 OK"
@@ -174,6 +174,14 @@ run_kubectl_get_tests() {
   ## check --allow-missing-template-keys=false results in an error for a missing key with go
   output_message=$(! kubectl get pod valid-pod --allow-missing-template-keys=false -o go-template='{{.missing}}' "${kube_flags[@]}")
   kube::test::if_has_string "${output_message}" 'map has no entry for key "missing"'
+
+  ## check --subresource=status works
+  output_message=$(kubectl get "${kube_flags[@]}" pod valid-pod --subresource=status)
+  kube::test::if_has_string "${output_message}" 'valid-pod'
+
+   ## check --subresource=scale returns an error for pods
+  output_message=$(! kubectl get pod valid-pod --subresource=scale 2>&1 "${kube_flags[@]:?}")
+  kube::test::if_has_string "${output_message}" 'the server could not find the requested resource'
 
   ### Test kubectl get watch
   output_message=$(kubectl get pods -w --request-timeout=1 "${kube_flags[@]}")
@@ -315,6 +323,22 @@ run_kubectl_sort_by_tests() {
   output_message=$(kubectl get pods --sort-by="{metadata.creationTimestamp}")
   kube::test::if_sort_by_has_correct_order "${output_message}" "sorted-pod1:sorted-pod2:sorted-pod3:"
 
+  # ensure sorting by resource memory request works
+  output_message=$(kubectl get pods --sort-by="{.spec.containers[0].resources.requests.memory}")
+  kube::test::if_sort_by_has_correct_order "${output_message}" "sorted-pod3:sorted-pod1:sorted-pod2:"
+
+  # ensure sorting by resource cpu request works
+  output_message=$(kubectl get pods --sort-by="{.spec.containers[0].resources.requests.cpu}")
+  kube::test::if_sort_by_has_correct_order "${output_message}" "sorted-pod3:sorted-pod1:sorted-pod2:"
+
+  # ensure sorting by resource memory limit works
+  output_message=$(kubectl get pods --sort-by="{.spec.containers[0].resources.limits.memory}")
+  kube::test::if_sort_by_has_correct_order "${output_message}" "sorted-pod3:sorted-pod1:sorted-pod2:"
+
+  # ensure sorting by resource cpu limit works
+   output_message=$(kubectl get pods --sort-by="{.spec.containers[0].resources.limits.cpu}")
+  kube::test::if_sort_by_has_correct_order "${output_message}" "sorted-pod3:sorted-pod1:sorted-pod2:"
+
   # ensure sorting using fallback codepath still works
   output_message=$(kubectl get pods --sort-by="{spec.containers[0].name}" --server-print=false --v=8 2>&1)
   kube::test::if_sort_by_has_correct_order "${output_message}" "sorted-pod2:sorted-pod1:sorted-pod3:"
@@ -386,6 +410,26 @@ run_kubectl_all_namespace_tests() {
   output_message=$(kubectl get nodes --all-namespaces 2>&1)
   # Post-condition: output with no NAMESPACE field
   kube::test::if_has_not_string "${output_message}" "NAMESPACE"
+
+  set +o nounset
+  set +o errexit
+}
+
+
+run_deprecated_api_tests() {
+  set -o nounset
+  set -o errexit
+
+  create_and_use_new_namespace
+  kube::log::status "Testing deprecated APIs"
+
+  # Test deprecated API request output
+  # TODO(liggitt): switch this to a custom deprecated resource once CRDs support marking versions as deprecated
+  output_message=$(kubectl get podsecuritypolicies.v1beta1.policy 2>&1 "${kube_flags[@]}")
+  kube::test::if_has_string "${output_message}" 'PodSecurityPolicy is deprecated'
+  output_message=$(! kubectl get podsecuritypolicies.v1beta1.policy --warnings-as-errors 2>&1 "${kube_flags[@]}")
+  kube::test::if_has_string "${output_message}" 'PodSecurityPolicy is deprecated'
+  kube::test::if_has_string "${output_message}" 'error: 1 warning received'
 
   set +o nounset
   set +o errexit

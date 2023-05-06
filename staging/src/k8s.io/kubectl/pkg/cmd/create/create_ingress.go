@@ -62,7 +62,7 @@ var (
 	Create an ingress with the specified name.`))
 
 	ingressExample = templates.Examples(i18n.T(`
-		# Create a single ingress called 'simple' that directs requests to foo.com/bar to svc 
+		# Create a single ingress called 'simple' that directs requests to foo.com/bar to svc
 		# svc1:8080 with a tls secret "my-cert"
 		kubectl create ingress simple --rule="foo.com/bar=svc1:8080,tls=my-cert"
 
@@ -75,7 +75,7 @@ var (
 			--annotation ingress.annotation2=bla
 
 		# Create an ingress with the same host and multiple paths
-		kubectl create ingress multipath --class=default \ 
+		kubectl create ingress multipath --class=default \
 			--rule="foo.com/=svc:port" \
 			--rule="foo.com/admin/=svcadmin:portadmin"
 
@@ -88,11 +88,11 @@ var (
 		kubectl create ingress ingtls --class=default \
 		   --rule="foo.com/=svc:https,tls" \
 		   --rule="foo.com/path/subpath*=othersvc:8080"
-		
+
 		# Create an ingress with TLS enabled using a specific secret and pathType as Prefix
 		kubectl create ingress ingsecret --class=default \
 		   --rule="foo.com/*=svc:8080,tls=secret1"
-		
+
 		# Create an ingress with a default backend
 		kubectl create ingress ingdefault --class=default \
 		   --default-backend=defaultsvc:http \
@@ -116,9 +116,10 @@ type CreateIngressOptions struct {
 	EnforceNamespace bool
 	CreateAnnotation bool
 
-	Client         networkingv1client.NetworkingV1Interface
-	DryRunStrategy cmdutil.DryRunStrategy
-	DryRunVerifier *resource.DryRunVerifier
+	Client              networkingv1client.NetworkingV1Interface
+	DryRunStrategy      cmdutil.DryRunStrategy
+	DryRunVerifier      *resource.QueryParamVerifier
+	ValidationDirective string
 
 	FieldManager string
 
@@ -142,7 +143,7 @@ func NewCmdCreateIngress(f cmdutil.Factory, ioStreams genericclioptions.IOStream
 		Use:                   "ingress NAME --rule=host/path=service:port[,tls[=secret]] ",
 		DisableFlagsInUseLine: true,
 		Aliases:               []string{"ing"},
-		Short:                 ingressLong,
+		Short:                 i18n.T("Create an ingress with the specified name"),
 		Long:                  ingressLong,
 		Example:               ingressExample,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -198,11 +199,7 @@ func (o *CreateIngressOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, a
 	if err != nil {
 		return err
 	}
-	discoveryClient, err := f.ToDiscoveryClient()
-	if err != nil {
-		return err
-	}
-	o.DryRunVerifier = resource.NewDryRunVerifier(dynamicClient, discoveryClient)
+	o.DryRunVerifier = resource.NewQueryParamVerifier(dynamicClient, f.OpenAPIGetter(), resource.QueryParamDryRun)
 	cmdutil.PrintFlagsWithDryRunStrategy(o.PrintFlags, o.DryRunStrategy)
 
 	printer, err := o.PrintFlags.ToPrinter()
@@ -211,6 +208,11 @@ func (o *CreateIngressOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, a
 	}
 	o.PrintObj = func(obj runtime.Object) error {
 		return printer.PrintObj(obj, o.Out)
+	}
+
+	o.ValidationDirective, err = cmdutil.GetValidationDirective(cmd)
+	if err != nil {
+		return err
 	}
 	return nil
 }
@@ -258,6 +260,7 @@ func (o *CreateIngressOptions) Run() error {
 		if o.FieldManager != "" {
 			createOptions.FieldManager = o.FieldManager
 		}
+		createOptions.FieldValidation = o.ValidationDirective
 		if o.DryRunStrategy == cmdutil.DryRunServer {
 			if err := o.DryRunVerifier.HasSupport(ingress.GroupVersionKind()); err != nil {
 				return err
@@ -324,8 +327,7 @@ func (o *CreateIngressOptions) buildIngressSpec() networkingv1.IngressSpec {
 }
 
 func (o *CreateIngressOptions) buildTLSRules() []networkingv1.IngressTLS {
-	var hostAlreadyPresent map[string]struct{}
-	hostAlreadyPresent = make(map[string]struct{})
+	hostAlreadyPresent := make(map[string]struct{})
 
 	ingressTLSs := []networkingv1.IngressTLS{}
 	var secret string

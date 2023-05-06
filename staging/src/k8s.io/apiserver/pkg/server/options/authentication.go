@@ -17,11 +17,10 @@ limitations under the License.
 package options
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
-
-	"k8s.io/apiserver/pkg/server/dynamiccertificates"
 
 	"github.com/spf13/pflag"
 
@@ -30,9 +29,11 @@ import (
 	"k8s.io/apiserver/pkg/authentication/authenticatorfactory"
 	"k8s.io/apiserver/pkg/authentication/request/headerrequest"
 	"k8s.io/apiserver/pkg/server"
+	"k8s.io/apiserver/pkg/server/dynamiccertificates"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/transport"
 	"k8s.io/klog/v2"
 	openapicommon "k8s.io/kube-openapi/pkg/common"
 )
@@ -198,6 +199,9 @@ type DelegatingAuthenticationOptions struct {
 	// TokenRequestTimeout specifies a time limit for requests made by the authorization webhook client.
 	// The default value is set to 10 seconds.
 	TokenRequestTimeout time.Duration
+
+	// CustomRoundTripperFn allows for specifying a middleware function for custom HTTP behaviour for the authentication webhook client.
+	CustomRoundTripperFn transport.WrapperFunc
 }
 
 func NewDelegatingAuthenticationOptions() *DelegatingAuthenticationOptions {
@@ -223,6 +227,11 @@ func (s *DelegatingAuthenticationOptions) WithCustomRetryBackoff(backoff wait.Ba
 // WithRequestTimeout sets the given timeout for requests made by the authentication webhook client.
 func (s *DelegatingAuthenticationOptions) WithRequestTimeout(timeout time.Duration) {
 	s.TokenRequestTimeout = timeout
+}
+
+// WithCustomRoundTripper allows for specifying a middleware function for custom HTTP behaviour for the authentication webhook client.
+func (s *DelegatingAuthenticationOptions) WithCustomRoundTripper(rt transport.WrapperFunc) {
+	s.CustomRoundTripperFn = rt
 }
 
 func (s *DelegatingAuthenticationOptions) Validate() []error {
@@ -287,20 +296,20 @@ func (s *DelegatingAuthenticationOptions) ApplyTo(authenticationInfo *server.Aut
 
 	// configure token review
 	if client != nil {
-		cfg.TokenAccessReviewClient = client.AuthenticationV1().TokenReviews()
+		cfg.TokenAccessReviewClient = client.AuthenticationV1()
 	}
 
 	// get the clientCA information
-	clientCAFileSpecified := len(s.ClientCert.ClientCA) > 0
+	clientCASpecified := s.ClientCert != ClientCertAuthenticationOptions{}
 	var clientCAProvider dynamiccertificates.CAContentProvider
-	if clientCAFileSpecified {
+	if clientCASpecified {
 		clientCAProvider, err = s.ClientCert.GetClientCAContentProvider()
 		if err != nil {
-			return fmt.Errorf("unable to load client CA file %q: %v", s.ClientCert.ClientCA, err)
+			return fmt.Errorf("unable to load client CA provider: %v", err)
 		}
 		cfg.ClientCertificateCAContentProvider = clientCAProvider
 		if err = authenticationInfo.ApplyClientCert(cfg.ClientCertificateCAContentProvider, servingInfo); err != nil {
-			return fmt.Errorf("unable to assign  client CA file: %v", err)
+			return fmt.Errorf("unable to assign client CA provider: %v", err)
 		}
 
 	} else if !s.SkipInClusterLookup {
@@ -335,8 +344,8 @@ func (s *DelegatingAuthenticationOptions) ApplyTo(authenticationInfo *server.Aut
 			if err != nil {
 				if s.TolerateInClusterLookupFailure {
 					klog.Warningf("Error looking up in-cluster authentication configuration: %v", err)
-					klog.Warningf("Continuing without authentication configuration. This may treat all requests as anonymous.")
-					klog.Warningf("To require authentication configuration lookup to succeed, set --authentication-tolerate-lookup-failure=false")
+					klog.Warning("Continuing without authentication configuration. This may treat all requests as anonymous.")
+					klog.Warning("To require authentication configuration lookup to succeed, set --authentication-tolerate-lookup-failure=false")
 				} else {
 					return fmt.Errorf("unable to load configmap based request-header-client-ca-file: %v", err)
 				}
@@ -379,7 +388,10 @@ func (s *DelegatingAuthenticationOptions) createRequestHeaderConfig(client kuber
 	}
 
 	//  look up authentication configuration in the cluster and in case of an err defer to authentication-tolerate-lookup-failure flag
-	if err := dynamicRequestHeaderProvider.RunOnce(); err != nil {
+	//  We are passing the context to ProxyCerts.RunOnce as it needs to implement RunOnce(ctx) however the
+	//  context is not used at all. So passing a empty context shouldn't be a problem
+	ctx := context.TODO()
+	if err := dynamicRequestHeaderProvider.RunOnce(ctx); err != nil {
 		return nil, err
 	}
 
@@ -424,6 +436,9 @@ func (s *DelegatingAuthenticationOptions) getClient() (kubernetes.Interface, err
 	// if multiple timeouts were set, the request will pick the smaller timeout to be applied, leaving other useless.
 	//
 	// see https://github.com/golang/go/blob/a937729c2c2f6950a32bc5cd0f5b88700882f078/src/net/http/client.go#L364
+	if s.CustomRoundTripperFn != nil {
+		clientConfig.Wrap(s.CustomRoundTripperFn)
+	}
 
 	return kubernetes.NewForConfig(clientConfig)
 }

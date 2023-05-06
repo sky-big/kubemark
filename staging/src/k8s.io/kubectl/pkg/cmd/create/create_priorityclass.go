@@ -38,16 +38,16 @@ import (
 
 var (
 	pcLong = templates.LongDesc(i18n.T(`
-		Create a priorityclass with the specified name, value, globalDefault and description`))
+		Create a priority class with the specified name, value, globalDefault and description.`))
 
 	pcExample = templates.Examples(i18n.T(`
-		# Create a priorityclass named high-priority
+		# Create a priority class named high-priority
 		kubectl create priorityclass high-priority --value=1000 --description="high priority"
 
-		# Create a priorityclass named default-priority that considered as the global default priority
+		# Create a priority class named default-priority that is considered as the global default priority
 		kubectl create priorityclass default-priority --value=1000 --global-default=true --description="default priority"
 
-		# Create a priorityclass named high-priority that can not preempt pods with lower priority
+		# Create a priority class named high-priority that cannot preempt pods with lower priority
 		kubectl create priorityclass high-priority --value=1000 --description="high priority" --preemption-policy="Never"`))
 )
 
@@ -64,13 +64,15 @@ type PriorityClassOptions struct {
 	FieldManager     string
 	CreateAnnotation bool
 
-	Client         *schedulingv1client.SchedulingV1Client
-	DryRunStrategy cmdutil.DryRunStrategy
-	DryRunVerifier *resource.DryRunVerifier
+	Client              *schedulingv1client.SchedulingV1Client
+	DryRunStrategy      cmdutil.DryRunStrategy
+	DryRunVerifier      *resource.QueryParamVerifier
+	ValidationDirective string
 
 	genericclioptions.IOStreams
 }
 
+// NewPriorityClassOptions returns an initialized PriorityClassOptions instance
 func NewPriorityClassOptions(ioStreams genericclioptions.IOStreams) *PriorityClassOptions {
 	return &PriorityClassOptions{
 		Value:            0,
@@ -88,7 +90,7 @@ func NewCmdCreatePriorityClass(f cmdutil.Factory, ioStreams genericclioptions.IO
 		Use:                   "priorityclass NAME --value=VALUE --global-default=BOOL [--dry-run=server|client|none]",
 		DisableFlagsInUseLine: true,
 		Aliases:               []string{"pc"},
-		Short:                 i18n.T("Create a priorityclass with the specified name."),
+		Short:                 i18n.T("Create a priority class with the specified name"),
 		Long:                  pcLong,
 		Example:               pcExample,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -137,11 +139,7 @@ func (o *PriorityClassOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, a
 	if err != nil {
 		return err
 	}
-	discoveryClient, err := f.ToDiscoveryClient()
-	if err != nil {
-		return err
-	}
-	o.DryRunVerifier = resource.NewDryRunVerifier(dynamicClient, discoveryClient)
+	o.DryRunVerifier = resource.NewQueryParamVerifier(dynamicClient, f.OpenAPIGetter(), resource.QueryParamDryRun)
 	cmdutil.PrintFlagsWithDryRunStrategy(o.PrintFlags, o.DryRunStrategy)
 
 	printer, err := o.PrintFlags.ToPrinter()
@@ -150,6 +148,11 @@ func (o *PriorityClassOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, a
 	}
 	o.PrintObj = func(obj runtime.Object) error {
 		return printer.PrintObj(obj, o.Out)
+	}
+
+	o.ValidationDirective, err = cmdutil.GetValidationDirective(cmd)
+	if err != nil {
+		return err
 	}
 
 	return nil
@@ -171,6 +174,7 @@ func (o *PriorityClassOptions) Run() error {
 		if o.FieldManager != "" {
 			createOptions.FieldManager = o.FieldManager
 		}
+		createOptions.FieldValidation = o.ValidationDirective
 		if o.DryRunStrategy == cmdutil.DryRunServer {
 			if err := o.DryRunVerifier.HasSupport(priorityClass.GroupVersionKind()); err != nil {
 				return err
@@ -180,7 +184,7 @@ func (o *PriorityClassOptions) Run() error {
 		var err error
 		priorityClass, err = o.Client.PriorityClasses().Create(context.TODO(), priorityClass, createOptions)
 		if err != nil {
-			return fmt.Errorf("failed to create clusterrolebinding: %v", err)
+			return fmt.Errorf("failed to create priorityclass: %v", err)
 		}
 	}
 

@@ -87,7 +87,6 @@ func TestSetDefaultAttachRequired(t *testing.T) {
 }
 
 func TestSetDefaultStorageCapacityEnabled(t *testing.T) {
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.CSIStorageCapacity, true)()
 	driver := &storagev1beta1.CSIDriver{}
 
 	// field should be defaulted
@@ -98,18 +97,6 @@ func TestSetDefaultStorageCapacityEnabled(t *testing.T) {
 		t.Errorf("Expected StorageCapacity to be defaulted to: %+v, got: nil", defaultStorageCapacity)
 	} else if *outStorageCapacity != defaultStorageCapacity {
 		t.Errorf("Expected StorageCapacity to be defaulted to: %+v, got: %+v", defaultStorageCapacity, outStorageCapacity)
-	}
-}
-
-func TestSetDefaultStorageCapacityDisabled(t *testing.T) {
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.CSIStorageCapacity, false)()
-	driver := &storagev1beta1.CSIDriver{}
-
-	// field should not be defaulted
-	output := roundTrip(t, runtime.Object(driver)).(*storagev1beta1.CSIDriver)
-	outStorageCapacity := output.Spec.StorageCapacity
-	if outStorageCapacity != nil {
-		t.Errorf("Expected StorageCapacity to remain nil, got: %+v", outStorageCapacity)
 	}
 }
 
@@ -142,7 +129,6 @@ func TestSetDefaultVolumeLifecycleModesDisabled(t *testing.T) {
 
 func TestSetDefaultCSIDriver(t *testing.T) {
 	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.CSIInlineVolume, true)()
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.CSIServiceAccountToken, true)()
 
 	enabled := true
 	disabled := false

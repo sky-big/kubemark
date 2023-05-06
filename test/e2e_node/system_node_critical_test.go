@@ -28,15 +28,25 @@ import (
 	kubeletconfig "k8s.io/kubernetes/pkg/kubelet/apis/config"
 	evictionapi "k8s.io/kubernetes/pkg/kubelet/eviction/api"
 	"k8s.io/kubernetes/test/e2e/framework"
+	admissionapi "k8s.io/pod-security-admission/api"
 
 	"github.com/onsi/ginkgo"
 	"github.com/onsi/gomega"
 )
 
-var _ = framework.KubeDescribe("SystemNodeCriticalPod [Slow] [Serial] [Disruptive] [NodeFeature:SystemNodeCriticalPod]", func() {
+var _ = SIGDescribe("SystemNodeCriticalPod [Slow] [Serial] [Disruptive] [NodeFeature:SystemNodeCriticalPod]", func() {
 	f := framework.NewDefaultFramework("system-node-critical-pod-test")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	// this test only manipulates pods in kube-system
 	f.SkipNamespaceCreation = true
+
+	ginkgo.AfterEach(func() {
+		if framework.TestContext.PrepullImages {
+			// The test may cause the prepulled images to be evicted,
+			// prepull those images again to ensure this test not affect following tests.
+			PrePullAllImages()
+		}
+	})
 
 	ginkgo.Context("when create a system-node-critical pod", func() {
 		tempSetCurrentKubeletConfig(f, func(initialConfig *kubeletconfig.KubeletConfiguration) {

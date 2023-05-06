@@ -41,6 +41,7 @@ import (
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/polymorphichelpers"
 	"k8s.io/kubectl/pkg/util"
+	"k8s.io/kubectl/pkg/util/completion"
 	"k8s.io/kubectl/pkg/util/i18n"
 	"k8s.io/kubectl/pkg/util/templates"
 )
@@ -61,12 +62,12 @@ type PortForwardOptions struct {
 
 var (
 	portforwardLong = templates.LongDesc(i18n.T(`
-                Forward one or more local ports to a pod. This command requires the node to have 'socat' installed.
+                Forward one or more local ports to a pod.
 
                 Use resource type/name such as deployment/mydeployment to select a pod. Resource type defaults to 'pod' if omitted.
 
                 If there are multiple pods matching the criteria, a pod will be selected automatically. The
-                forwarding session ends when the selected pod terminates, and rerun of the command is needed
+                forwarding session ends when the selected pod terminates, and a rerun of the command is needed
                 to resume forwarding.`))
 
 	portforwardExample = templates.Examples(i18n.T(`
@@ -109,16 +110,11 @@ func NewCmdPortForward(f cmdutil.Factory, streams genericclioptions.IOStreams) *
 		Short:                 i18n.T("Forward one or more local ports to a pod"),
 		Long:                  portforwardLong,
 		Example:               portforwardExample,
+		ValidArgsFunction:     completion.PodResourceNameCompletionFunc(f),
 		Run: func(cmd *cobra.Command, args []string) {
-			if err := opts.Complete(f, cmd, args); err != nil {
-				cmdutil.CheckErr(err)
-			}
-			if err := opts.Validate(); err != nil {
-				cmdutil.CheckErr(cmdutil.UsageErrorf(cmd, "%v", err.Error()))
-			}
-			if err := opts.RunPortForward(); err != nil {
-				cmdutil.CheckErr(err)
-			}
+			cmdutil.CheckErr(opts.Complete(f, cmd, args))
+			cmdutil.CheckErr(opts.Validate())
+			cmdutil.CheckErr(opts.RunPortForward())
 		},
 	}
 	cmdutil.AddPodRunningTimeoutFlag(cmd, defaultPodPortForwardWaitTimeout)

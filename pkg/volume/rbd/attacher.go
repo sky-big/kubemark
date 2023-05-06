@@ -146,7 +146,7 @@ func (attacher *rbdAttacher) GetDeviceMountPath(spec *volume.Spec) (string, erro
 // MountDevice implements Attacher.MountDevice. It is called by the kubelet to
 // mount device at the given mount path.
 // This method is idempotent, callers are responsible for retrying on failure.
-func (attacher *rbdAttacher) MountDevice(spec *volume.Spec, devicePath string, deviceMountPath string) error {
+func (attacher *rbdAttacher) MountDevice(spec *volume.Spec, devicePath string, deviceMountPath string, _ volume.DeviceMounterArgs) error {
 	klog.V(4).Infof("rbd: mouting device %s to %s", devicePath, deviceMountPath)
 	notMnt, err := attacher.mounter.IsLikelyNotMountPoint(deviceMountPath)
 	if err != nil {
@@ -199,11 +199,12 @@ var _ volume.DeviceUnmounter = &rbdDetacher{}
 // mount of the RBD image. This is called once all bind mounts have been
 // unmounted.
 // Internally, it does four things:
-//  - Unmount device from deviceMountPath.
-//  - Detach device from the node.
-//  - Remove lock if found. (No need to check volume readonly or not, because
-//  device is not on the node anymore, it's safe to remove lock.)
-//  - Remove the deviceMountPath at last.
+//   - Unmount device from deviceMountPath.
+//   - Detach device from the node.
+//   - Remove lock if found. (No need to check volume readonly or not, because
+//     device is not on the node anymore, it's safe to remove lock.)
+//   - Remove the deviceMountPath at last.
+//
 // This method is idempotent, callers are responsible for retrying on failure.
 func (detacher *rbdDetacher) UnmountDevice(deviceMountPath string) error {
 	if pathExists, pathErr := mount.PathExists(deviceMountPath); pathErr != nil {
@@ -226,7 +227,7 @@ func (detacher *rbdDetacher) UnmountDevice(deviceMountPath string) error {
 		if err = detacher.mounter.Unmount(deviceMountPath); err != nil {
 			return err
 		}
-		klog.V(3).Infof("rbd: successfully umount device mountpath %s", deviceMountPath)
+		klog.V(3).Infof("rbd: successfully unmount device mountpath %s", deviceMountPath)
 	}
 
 	// Get devicePath from deviceMountPath if devicePath is empty

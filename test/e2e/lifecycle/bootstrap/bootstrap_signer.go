@@ -18,6 +18,7 @@ package bootstrap
 
 import (
 	"context"
+
 	"github.com/onsi/ginkgo"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -25,6 +26,7 @@ import (
 	bootstrapapi "k8s.io/cluster-bootstrap/token/api"
 	"k8s.io/kubernetes/test/e2e/framework"
 	"k8s.io/kubernetes/test/e2e/lifecycle"
+	admissionapi "k8s.io/pod-security-admission/api"
 )
 
 const (
@@ -40,6 +42,7 @@ var _ = lifecycle.SIGDescribe("[Feature:BootstrapTokens]", func() {
 	var c clientset.Interface
 
 	f := framework.NewDefaultFramework("bootstrap-signer")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	ginkgo.AfterEach(func() {
 		if len(secretNeedClean) > 0 {
 			ginkgo.By("delete the bootstrap token secret")
@@ -78,11 +81,14 @@ var _ = lifecycle.SIGDescribe("[Feature:BootstrapTokens]", func() {
 
 		ginkgo.By("wait for the bootstrap token secret be signed")
 		err = WaitforSignedClusterInfoByBootStrapToken(c, tokenID)
+		framework.ExpectNoError(err)
 
 		cfgMap, err := f.ClientSet.CoreV1().ConfigMaps(metav1.NamespacePublic).Get(context.TODO(), bootstrapapi.ConfigMapClusterInfo, metav1.GetOptions{})
 		framework.ExpectNoError(err)
 		signedToken, ok := cfgMap.Data[bootstrapapi.JWSSignatureKeyPrefix+tokenID]
-		framework.ExpectEqual(ok, true)
+		if !ok {
+			framework.Failf("expected signed token with key %q not found in %+v", bootstrapapi.JWSSignatureKeyPrefix+tokenID, cfgMap.Data)
+		}
 
 		ginkgo.By("update the cluster-info ConfigMap")
 		originalData := cfgMap.Data[bootstrapapi.KubeConfigKey]

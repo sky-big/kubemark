@@ -13,8 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This script is used by bazel as the workspace_status_command to implement
+# This script was used by bazel as the workspace_status_command to implement
 # build stamping with git information.
+#
+# It is still useful for obtaining kube::version::get_version_vars without
+# sourcing Kubernetes build internals.
+#
 # Usage: `hack/print-workspace-status.sh`.
 
 set -o errexit
@@ -39,7 +43,7 @@ STABLE_BUILD_SCM_REVISION ${KUBE_GIT_VERSION-}
 STABLE_BUILD_MAJOR_VERSION ${KUBE_GIT_MAJOR-}
 STABLE_BUILD_MINOR_VERSION ${KUBE_GIT_MINOR-}
 STABLE_DOCKER_TAG ${KUBE_GIT_VERSION/+/_}
-STABLE_DOCKER_REGISTRY ${KUBE_DOCKER_REGISTRY:-k8s.gcr.io}
+STABLE_DOCKER_REGISTRY ${KUBE_DOCKER_REGISTRY:-registry.k8s.io}
 STABLE_DOCKER_PUSH_REGISTRY ${KUBE_DOCKER_PUSH_REGISTRY:-${KUBE_DOCKER_REGISTRY:-staging-k8s.gcr.io}}
 gitCommit ${KUBE_GIT_COMMIT-}
 gitTreeState ${KUBE_GIT_TREE_STATE-}

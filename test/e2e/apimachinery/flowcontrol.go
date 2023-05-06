@@ -31,7 +31,7 @@ import (
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
 
-	flowcontrol "k8s.io/api/flowcontrol/v1beta1"
+	flowcontrol "k8s.io/api/flowcontrol/v1beta2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apiserver/pkg/util/apihelpers"
@@ -39,6 +39,7 @@ import (
 	"k8s.io/client-go/rest"
 	clientsideflowcontrol "k8s.io/client-go/util/flowcontrol"
 	"k8s.io/kubernetes/test/e2e/framework"
+	admissionapi "k8s.io/pod-security-admission/api"
 )
 
 const (
@@ -52,6 +53,7 @@ var (
 
 var _ = SIGDescribe("API priority and fairness", func() {
 	f := framework.NewDefaultFramework("apf")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 
 	ginkgo.It("should ensure that requests can be classified by adding FlowSchema and PriorityLevelConfiguration", func() {
 		testingFlowSchemaName := "e2e-testing-flowschema"
@@ -122,8 +124,8 @@ var _ = SIGDescribe("API priority and fairness", func() {
 			// In contrast, "lowqps" stays under its concurrency shares.
 			// Additionally, the "highqps" client also has a higher matching
 			// precedence for its flow schema.
-			{username: highQPSClientName, qps: 100.0, concurrencyMultiplier: 2.0, matchingPrecedence: 999, expectedCompletedPercentage: 0.75},
-			{username: lowQPSClientName, qps: 5.0, concurrencyMultiplier: 0.5, matchingPrecedence: 1000, expectedCompletedPercentage: 0.75},
+			{username: highQPSClientName, qps: 90, concurrencyMultiplier: 2.0, matchingPrecedence: 999, expectedCompletedPercentage: 0.90},
+			{username: lowQPSClientName, qps: 4, concurrencyMultiplier: 0.5, matchingPrecedence: 1000, expectedCompletedPercentage: 0.90},
 		}
 
 		ginkgo.By("creating test priority levels and flow schemas")
@@ -150,7 +152,7 @@ var _ = SIGDescribe("API priority and fairness", func() {
 			if clients[i].concurrency < 1 {
 				clients[i].concurrency = 1
 			}
-			framework.Logf("request concurrency for %q will be %d (concurrency share = %d)", clients[i].username, clients[i].concurrency, realConcurrency)
+			framework.Logf("request concurrency for %q will be %d (that is %d times client multiplier)", clients[i].username, clients[i].concurrency, realConcurrency)
 		}
 
 		ginkgo.By(fmt.Sprintf("starting uniform QPS load for %s", loadDuration.String()))
@@ -168,7 +170,7 @@ var _ = SIGDescribe("API priority and fairness", func() {
 		ginkgo.By("checking completed requests with expected values")
 		for _, client := range clients {
 			// Each client should have 95% of its ideal number of completed requests.
-			maxCompletedRequests := float64(client.concurrency) * client.qps * float64(loadDuration/time.Second)
+			maxCompletedRequests := float64(client.concurrency) * client.qps * loadDuration.Seconds()
 			fractionCompleted := float64(client.completedRequests) / maxCompletedRequests
 			framework.Logf("client %q completed %d/%d requests (%.1f%%)", client.username, client.completedRequests, int32(maxCompletedRequests), 100*fractionCompleted)
 			if fractionCompleted < client.expectedCompletedPercentage {
@@ -212,8 +214,8 @@ var _ = SIGDescribe("API priority and fairness", func() {
 			expectedCompletedPercentage float64 //lint:ignore U1000 field is actually used
 		}
 		clients := []client{
-			{username: highQPSClientName, qps: 100.0, concurrencyMultiplier: 2.0, expectedCompletedPercentage: 0.75},
-			{username: lowQPSClientName, qps: 5.0, concurrencyMultiplier: 0.5, expectedCompletedPercentage: 0.90},
+			{username: highQPSClientName, qps: 90, concurrencyMultiplier: 2.0, expectedCompletedPercentage: 0.90},
+			{username: lowQPSClientName, qps: 4, concurrencyMultiplier: 0.5, expectedCompletedPercentage: 0.90},
 		}
 
 		framework.Logf("getting real concurrency")
@@ -255,7 +257,7 @@ var _ = SIGDescribe("API priority and fairness", func() {
 // createPriorityLevel creates a priority level with the provided assured
 // concurrency share.
 func createPriorityLevel(f *framework.Framework, priorityLevelName string, assuredConcurrencyShares int32) (*flowcontrol.PriorityLevelConfiguration, func()) {
-	createdPriorityLevel, err := f.ClientSet.FlowcontrolV1beta1().PriorityLevelConfigurations().Create(
+	createdPriorityLevel, err := f.ClientSet.FlowcontrolV1beta2().PriorityLevelConfigurations().Create(
 		context.TODO(),
 		&flowcontrol.PriorityLevelConfiguration{
 			ObjectMeta: metav1.ObjectMeta{
@@ -274,7 +276,7 @@ func createPriorityLevel(f *framework.Framework, priorityLevelName string, assur
 		metav1.CreateOptions{})
 	framework.ExpectNoError(err)
 	return createdPriorityLevel, func() {
-		framework.ExpectNoError(f.ClientSet.FlowcontrolV1beta1().PriorityLevelConfigurations().Delete(context.TODO(), priorityLevelName, metav1.DeleteOptions{}))
+		framework.ExpectNoError(f.ClientSet.FlowcontrolV1beta2().PriorityLevelConfigurations().Delete(context.TODO(), priorityLevelName, metav1.DeleteOptions{}))
 	}
 }
 
@@ -322,7 +324,7 @@ func createFlowSchema(f *framework.Framework, flowSchemaName string, matchingPre
 		})
 	}
 
-	createdFlowSchema, err := f.ClientSet.FlowcontrolV1beta1().FlowSchemas().Create(
+	createdFlowSchema, err := f.ClientSet.FlowcontrolV1beta2().FlowSchemas().Create(
 		context.TODO(),
 		&flowcontrol.FlowSchema{
 			ObjectMeta: metav1.ObjectMeta{
@@ -352,7 +354,7 @@ func createFlowSchema(f *framework.Framework, flowSchemaName string, matchingPre
 		metav1.CreateOptions{})
 	framework.ExpectNoError(err)
 	return createdFlowSchema, func() {
-		framework.ExpectNoError(f.ClientSet.FlowcontrolV1beta1().FlowSchemas().Delete(context.TODO(), flowSchemaName, metav1.DeleteOptions{}))
+		framework.ExpectNoError(f.ClientSet.FlowcontrolV1beta2().FlowSchemas().Delete(context.TODO(), flowSchemaName, metav1.DeleteOptions{}))
 	}
 }
 
@@ -362,7 +364,7 @@ func createFlowSchema(f *framework.Framework, flowSchemaName string, matchingPre
 // schema status, and (2) metrics. The function times out after 30 seconds.
 func waitForSteadyState(f *framework.Framework, flowSchemaName string, priorityLevelName string) {
 	framework.ExpectNoError(wait.Poll(time.Second, 30*time.Second, func() (bool, error) {
-		fs, err := f.ClientSet.FlowcontrolV1beta1().FlowSchemas().Get(context.TODO(), flowSchemaName, metav1.GetOptions{})
+		fs, err := f.ClientSet.FlowcontrolV1beta2().FlowSchemas().Get(context.TODO(), flowSchemaName, metav1.GetOptions{})
 		if err != nil {
 			return false, err
 		}
@@ -416,7 +418,7 @@ func getFlowSchemaUID(response *http.Response) string {
 func uniformQPSLoadSingle(f *framework.Framework, username string, qps float64, loadDuration time.Duration) int32 {
 	var completed int32
 	var wg sync.WaitGroup
-	ticker := time.NewTicker(time.Duration(1e9/qps) * time.Nanosecond)
+	ticker := time.NewTicker(time.Duration(float64(time.Second) / qps))
 	defer ticker.Stop()
 	timer := time.NewTimer(loadDuration)
 	for {
